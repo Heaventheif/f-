@@ -141,17 +141,20 @@ export function dispatchMqttEvent(api, event, label, acceptedThreads) {
   if (["message", "message_reply", "log", "event"].includes(event.type)) {
     // Route through bounded queue — prevents unbounded parallelism and ensures
     // every async path has a top-level catch that never terminates the process.
+    // handleEvent (onChat) وhandleMessage (الأمر) مستقلان: يعملان بالتوازي كي لا ينتظر
+    // الأمر انتهاء معالجات onChat البطيئة (تنزيل رابط، نقلة شطرنج...). يبقى الـ slot محجوزًا
+    // حتى ينتهي الاثنان.
     _enqueue(async () => {
-      try {
-        await handleEvent(api, event);
-      } catch (e) {
-        console.error(`[EVENT ERR:${label}]`, e?.message ?? e);
-      }
-      try {
-        await handleMessage(api, event);
-      } catch (e) {
-        console.error(`[MSG ERR:${label}]`, e?.message ?? e);
-      }
+      await Promise.all([
+        (async () => {
+          try { await handleEvent(api, event); }
+          catch (e) { console.error(`[EVENT ERR:${label}]`, e?.message ?? e); }
+        })(),
+        (async () => {
+          try { await handleMessage(api, event); }
+          catch (e) { console.error(`[MSG ERR:${label}]`, e?.message ?? e); }
+        })(),
+      ]);
     }).catch(e => console.error(`[QUEUE ERR:${label}]`, e?.message ?? e));
   } else if (event.type === "message_reaction") {
     try {

@@ -163,7 +163,11 @@ export const handleMessage = async (rawApi, event) => {
   }
   const eventWithCommand = { ...event, command: commandName };
   const _botIndex = rawApi?.__botIndex ?? null;
-  const isGroupAdmin = await resolveGroupAdmin(api, event);
+  // مشرف المجموعة يُرفع إلى role 1 فقط، فلا يهم إلا للأوامر ذات role === 1.
+  // تجنّب طلب getThreadInfo (شبكة) قبل كل أمر لا يحتاجه.
+  const isGroupAdmin = (command.config?.role ?? 0) === 1
+    ? await resolveGroupAdmin(api, event)
+    : false;
   const authError = checkAuth(senderID, command, _botIndex, isGroupAdmin);
   if (authError) return;
   const cooldownError = checkAndSetCooldown(senderID, commandName, command);

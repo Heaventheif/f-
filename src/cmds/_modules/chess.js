@@ -99,8 +99,13 @@ async function endGame(game, winnerId = null) {
 }
 
 // ─── مساعدات ──────────────────────────────────────────────────────────
+const NAME_CACHE_TTL_MS = 60 * 60 * 1000;
+const _names = (globalThis.__chessNames ??= new Map()); // uid → { name, exp }
+
 async function getUserName(api, uid) {
   if (uid === "bot") return "🤖 البوت";
+  const hit = _names.get(uid);
+  if (hit && hit.exp > Date.now()) return hit.name;
   const fallback = String(uid).slice(-4);
   return new Promise((resolve) => {
     let done = false;
@@ -109,6 +114,10 @@ async function getUserName(api, uid) {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      if (v) {
+        if (_names.size > 500) _names.delete(_names.keys().next().value);
+        _names.set(uid, { name: v, exp: Date.now() + NAME_CACHE_TTL_MS });
+      }
       resolve(v || fallback);
     };
     timer = setTimeout(() => finish(null), USERINFO_TIMEOUT_MS);
@@ -150,9 +159,8 @@ async function sendBoard(api, threadID, messageID, imageBase64, caption) {
   try {
     const stream = Readable.from(Buffer.from(imageBase64, "base64"));
     stream.path = "chess_board.png";
-    await new Promise((resolve, reject) =>
-      global.safeSend(api, { body: caption, attachment: stream }, threadID,
-        (err, info) => (err ? reject(err) : resolve(info)), messageID));
+    // مسار الوسائط: فوري بلا انتظار في بوابة الخيط (فاصل 1.5ث + طابور الإرسالات الأخرى)
+    await global.mediaSend(api, { body: caption, attachment: stream }, threadID, undefined, messageID);
   } catch {
     global.safeSend(api, `${caption}\n⚠️ (تعذّر إرسال الصورة)`, threadID, null, messageID);
   }
@@ -237,10 +245,15 @@ async function onChat({ api, event }) {
   if (!getHfBaseOrNull()) return reply(api, NO_HF_MSG, threadID, messageID);
 
   _busy.add(game._id);
+  let persist = null;
   try {
+    const t0 = Date.now();
     const move = normalizeMove(text);
     const isBotGame = game.player_white === "bot" || game.player_black === "bot";
     const perspective = game.player_white === senderID ? "white" : "black";
+    const opponent = game.player_white === senderID ? game.player_black : game.player_white;
+    // اسم الخصم يُجلب أثناء انتظار المحرك (لا يرمي أبدًا)
+    const opponentName = isBotGame ? null : getUserName(api, opponent);
 
     let result;
     try {
@@ -253,7 +266,7 @@ async function onChat({ api, event }) {
     // نقلة مرفوضة: اللعبة لم تتقدم
     if (result.illegal_move_error) return reply(api, result.illegal_move_error, threadID, messageID);
 
-    const opponent = game.player_white === senderID ? game.player_black : game.player_white;
+    const tEngine = Date.now() - t0;
     let caption;
     if (result.game_over) {
       const side = winnerSide(result.winner);
@@ -272,15 +285,18 @@ async function onChat({ api, event }) {
     } else {
       // ضد البوت: البوت لعب ضمن نفس الطلب فيعود الدور للراسل
       const next = isBotGame ? senderID : opponent;
-      await updateGame(game._id, { fen: result.new_fen, current_turn: next });
+      persist = updateGame(game._id, { fen: result.new_fen, current_turn: next }); // RAM فوري، Mongo بالتوازي مع الإرسال
       const promo = move.length === 5 ? `\n⬆️ ترقية إلى ${PIECE_NAMES[move[4]] || PIECE_NAMES.q}` : "";
       caption = isBotGame
         ? `✅ نقلتك: ${move.toUpperCase()}${promo}\n🤖 البوت لعب — دورك الآن!`
-        : `✅ نقلة: ${move.toUpperCase()}${promo}\n🎯 دور: ${await getUserName(api, opponent)}`;
+        : `✅ نقلة: ${move.toUpperCase()}${promo}\n🎯 دور: ${await opponentName}`;
     }
 
+    const tSend0 = Date.now();
     await sendBoard(api, threadID, messageID, result.image_base64, caption);
+    console.log(`[CHESS] نقلة ${move}: المحرك ${tEngine}ms | الإرسال ${Date.now() - tSend0}ms | الإجمالي ${Date.now() - t0}ms`);
   } finally {
+    if (persist) await persist.catch(() => {}); // لا نحرّر القفل قبل اكتمال الحفظ
     _busy.delete(game._id);
   }
 }
