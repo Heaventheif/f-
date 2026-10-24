@@ -194,39 +194,6 @@ async function findBestChapterForLanguage(mangaId, chapterCandidates, lang, targ
   }
   return pickBestChapterResult(combined, targetNum);
 }
-// Fall back to the nearest available chapter number if no exact match exists.
-async function findNearestChapterAsLastResort(mangaId, targetNum) {
-  try {
-    const res = await http.get(`${API_BASE}/chapter`, {
-      params: {
-        manga: mangaId,
-        limit: CHAPTER_FETCH_LIMIT,
-        "order[chapter]": "asc",
-        "contentRating[]": ["safe", "suggestive", "erotica", "pornographic"],
-      },
-      headers: HEADERS,
-      timeout: 15000,
-    });
-    const data = Array.isArray(res.data?.data) ? res.data.data : [];
-    const readable = data.filter((item) => isReadableChapter(item?.attributes));
-    if (!readable.length) return null;
-    let nearest = null;
-    let nearestDiff = Infinity;
-    for (const item of readable) {
-      const n = Number(item.attributes.chapter);
-      if (Number.isNaN(n)) continue;
-      const diff = Math.abs(n - targetNum);
-      if (diff < nearestDiff) {
-        nearestDiff = diff;
-        nearest = item;
-      }
-    }
-    if (!nearest) return null;
-    return { id: nearest.id, lang: nearest.attributes.translatedLanguage };
-  } catch (_) {
-    return null;
-  }
-}
 // Resolve the best chapter to show, trying the requested language then others.
 async function resolveChapter(mangaId, chapterNumberStr, requestedLang) {
   const targetNum = Number(chapterNumberStr);

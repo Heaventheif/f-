@@ -2,21 +2,12 @@ import http from "../../utils/fetchHttp.js";
 import fs from "fs";
 import { splitFile, cleanupParts, NEEDS_SPLIT } from "../../utils/mediaSplitter.js";
 import { downloadToTemp } from "../../utils/mediaStream.js";
-import { buildYozoraDownloadUrl, getYozoraEntries, getYozoraInfo } from "../../utils/yozora.js";
-import { downloadYYMedia } from "../../utils/yyApi.js";
+import { downloadYYMedia, getTiktokApiUrl } from "../../utils/yyApi.js";
 const TUMBLR_API_KEY = process.env.TUMBLR_API_KEY || "";
-const TIKTOK_INFO_TIMEOUT_MS = 15_000;
-const TIKTOK_PROFILE_CACHE_TTL_MS = 30 * 60 * 1000;
-const TIKTOK_PROFILE_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
-// Defaults span meme and animal accounts; add public edit/music handles via TIKTOK_RANDOM_USERS.
-const DEFAULT_TIKTOK_USERS = ["meme", "corgibobaa"];
-const TIKTOK_USERS = parseTikTokUsers(process.env.TIKTOK_RANDOM_USERS);
 const _RECENTLY_SENT_KEY = "random_recentlySent";
 const _recentlySent = new Set();
 const _RECENT_LIMIT = 200;
 let _hydrated = false;
-const _tiktokProfileCache = new Map();
-const _tiktokProfileCooldown = new Map();
 function hydrateRecentlySent() {
   if (_hydrated) return;
   _hydrated = true;
@@ -31,24 +22,6 @@ function rememberSent(key) {
   }
   global.globalData?.set?.(_RECENTLY_SENT_KEY, [..._recentlySent]);
 }
-export function parseTikTokUsers(value) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return [...DEFAULT_TIKTOK_USERS];
-  const users = [...new Set(raw.split(",")
-    .map(user => user.trim().replace(/^@/, ""))
-    .filter(user => /^[\w.-]{2,32}$/.test(user)))];
-  return users.length ? users : [...DEFAULT_TIKTOK_USERS];
-}
-
-export function isTikTokVideoUrl(value) {
-  try {
-    const url = new URL(value);
-    return /(^|\.)tiktok\.com$/i.test(url.hostname) && /\/video\/\d+/.test(url.pathname);
-  } catch (_) {
-    return false;
-  }
-}
-
 export function chooseRandomUnseen(items, keyOf, seen = new Set()) {
   const valid = (Array.isArray(items) ? items : [])
     .filter(item => item && String(keyOf(item) || "").trim());
@@ -75,70 +48,24 @@ const VIDEO_BLOGS = [
   "awesome-picz", "thefrogman",
 ];
 
-async function getTikTokVideos(username) {
-  const cached = _tiktokProfileCache.get(username);
-  if (cached && Date.now() - cached.fetchedAt < TIKTOK_PROFILE_CACHE_TTL_MS) {
-    return cached.videos;
-  }
-  const retryAfter = _tiktokProfileCooldown.get(username) || 0;
-  if (retryAfter > Date.now()) {
-    if (cached?.videos.length) return cached.videos;
-    throw new Error("مصدر TikTok في مهلة تهدئة مؤقتة");
-  }
-  try {
-    const profileUrl = `https://www.tiktok.com/@${encodeURIComponent(username)}`;
-    const info = await getYozoraInfo(profileUrl, undefined, TIKTOK_INFO_TIMEOUT_MS);
-    const videos = [...new Map(
-      getYozoraEntries(info, 60)
-        .filter(entry => isTikTokVideoUrl(entry.url))
-        .map(entry => [entry.url, { id: entry.id, url: entry.url }]),
-    ).values()];
-    if (!videos.length) throw new Error("لم تُعثر على فيديوهات عامة في الحساب");
-    _tiktokProfileCache.set(username, { fetchedAt: Date.now(), videos });
-    _tiktokProfileCooldown.delete(username);
-    return videos;
-  } catch (error) {
-    _tiktokProfileCooldown.set(username, Date.now() + TIKTOK_PROFILE_FAILURE_COOLDOWN_MS);
-    if (cached?.videos.length) return cached.videos;
-    throw error;
-  }
+const RANDOM_TERMS = ["fyp", "viral", "trending", "funny", "foryou"];
+
+async function searchTikTokUrl(query) {
+  const endpoint = new URL(`${getTiktokApiUrl()}/api/search`);
+  endpoint.searchParams.set("q", query);
+  endpoint.searchParams.set("limit", "1");
+  endpoint.searchParams.set("format", "urls");
+  const response = await fetch(endpoint, { signal: AbortSignal.timeout(30_000) });
+  const body = await response.text().catch(() => "");
+  if (!response.ok) throw new Error(`TikTok Search API: HTTP ${response.status}`);
+  return body.split(/\r?\n/).map((l) => l.trim()).find((l) => /^https?:\/\//i.test(l)) || null;
 }
 
 async function tryTikTok() {
-  let repeatPool = [];
-  const usernames = shuffled(TIKTOK_USERS).slice(0, 3);
-  const attempts = usernames.map(async username => {
-    try {
-      const videos = await getTikTokVideos(username);
-      const fresh = videos.filter(video => !_recentlySent.has(`tiktok:${video.url}`));
-      if (fresh.length) {
-        const selected = chooseRandomUnseen(fresh, video => video.url, new Set());
-        return {
-          source: "tiktok",
-          sourceUrl: selected.url,
-          videoUrl: buildYozoraDownloadUrl(selected.url),
-          sentKey: `tiktok:${selected.url}`,
-        };
-      }
-      repeatPool.push(...videos);
-    } catch (error) {
-      console.warn(`[RANDOM] TikTok @${username} unavailable: ${error.message}`);
-    }
-    return null;
-  });
-  const picked = await Promise.any(attempts.map(attempt => attempt.then(result => {
-    if (result) return result;
-    throw new Error("لا توجد فيديوهات جديدة");
-  }))).catch(() => null);
-  if (picked) return picked;
-  if (!repeatPool.length) return null;
-  const selected = chooseRandomUnseen(repeatPool, video => video.url, new Set());
-  return {
-    source: "tiktok",
-    sourceUrl: selected.url,
-    videoUrl: buildYozoraDownloadUrl(selected.url),
-    sentKey: `tiktok:${selected.url}`,
-  };
+  const term = RANDOM_TERMS[Math.floor(Math.random() * RANDOM_TERMS.length)];
+  const url = await searchTikTokUrl(term);
+  if (!url || _recentlySent.has(`tiktok:${url}`)) return null;
+  return { source: "tiktok", sourceUrl: url, videoUrl: url, sentKey: `tiktok:${url}` };
 }
 
 async function tryTumblr() {
@@ -176,8 +103,12 @@ async function tryTumblr() {
 
 async function pickRandomVideo() {
   for (const provider of shuffled([tryTikTok, tryTumblr])) {
-    const picked = await provider();
-    if (picked) return picked;
+    try {
+      const picked = await provider();
+      if (picked) return picked;
+    } catch (error) {
+      console.warn(`[RANDOM] ${provider.name} failed: ${error.message}`);
+    }
   }
   return null;
 }
@@ -206,16 +137,9 @@ export default {
       const { videoUrl, sourceUrl, source: mediaSource, sentKey } = picked;
       let size;
       if (mediaSource === "tiktok") {
-        try {
-          const media = await downloadYYMedia(sourceUrl || videoUrl, { type: "video" });
-          tmpFile = media.filePath;
-          size = media.bytes;
-        } catch (yyError) {
-          console.warn(`[RANDOM] yy failed, using direct TikTok stream fallback: ${yyError.message}`);
-          const downloaded = await downloadToTemp(videoUrl, "mp4");
-          tmpFile = downloaded.tmpPath;
-          size = downloaded.size;
-        }
+        const media = await downloadYYMedia(sourceUrl || videoUrl, { type: "video" });
+        tmpFile = media.filePath;
+        size = media.bytes;
       } else {
         // Tumblr is not in yy's supported source list; keep its direct media URL path.
         const downloaded = await downloadToTemp(videoUrl, "mp4");

@@ -19,13 +19,3 @@ function start(label) {
 }
 export { start };
 export default { start };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-timing',
-  meta: { category: 'utils', path: 'src/utils/timing.js' },
-  setup(_ctx) {
-    // provides: start
-  },
-};

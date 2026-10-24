@@ -38,13 +38,3 @@ global.getUserRole = getUserRole;
 global.setCooldown = setCooldown;
 global.checkCooldown = checkCooldown;
 export { buildRoleSets, getUserRole, setCooldown, checkCooldown };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-roles',
-  meta: { category: 'utils', path: 'src/utils/roles.js' },
-  setup(_ctx) {
-    // provides: buildRoleSets, checkCooldown, getUserRole, setCooldown
-  },
-};

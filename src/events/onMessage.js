@@ -161,13 +161,3 @@ export function dispatchMqttEvent(api, event, label, acceptedThreads) {
     }
   }
 }
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-events-on-message',
-  meta: { category: 'event', path: 'src/events/onMessage.js' },
-  setup(_ctx) {
-    // provides: dispatchMqttEvent
-  },
-};

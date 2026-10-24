@@ -22,7 +22,7 @@ function buildChecks(projectRoot) {
       level: "warn",
       key: "HF_SPACE_URL",
       label: "HF_SPACE_URL",
-      message: "أوامر gemini/groq/manga/novel/pin/song/tts لن تعمل",
+      message: "أوامر chess/gemini/groq/manga/novel/pin/song/tts لن تعمل",
     },
     {
       level: "warn",
@@ -53,12 +53,3 @@ export function checkEnv(projectRoot) {
     console.error("[ENV] أضف APPSTATE صالحاً (مصفوفة JSON) إلى متغيرات البيئة قبل التشغيل");
   }
 }
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-env-check',
-  meta: { category: 'utils', path: 'src/utils/envCheck.js' },
-  setup(_ctx) {
-    // provides: checkEnv
-  },
-};

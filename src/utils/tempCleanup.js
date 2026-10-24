@@ -30,13 +30,3 @@ function cleanupOrphanTempFiles() {
 }
 global.cleanupOrphanTempFiles = cleanupOrphanTempFiles;
 export { cleanupOrphanTempFiles };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-temp-cleanup',
-  meta: { category: 'utils', path: 'src/utils/tempCleanup.js' },
-  setup(_ctx) {
-    // provides: cleanupOrphanTempFiles
-  },
-};

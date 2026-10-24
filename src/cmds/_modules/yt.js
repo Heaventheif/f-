@@ -1,6 +1,8 @@
 "use strict";
 import fs from "fs-extra";
-import { searchWithFallback, downloadWithFallback, cleanTemp } from "../../utils/ytProviders.js";
+import vreden from "@vreden/youtube_scraper";
+import { downloadYoutubeAudio, downloadYoutubeVideo } from "../../utils/yyApi.js";
+import { removeTempFile } from "../../utils/mediaFile.js";
 import { buildListText, attachReactionPicker } from "../../utils/reactionPicker.js";
 import { splitFile, cleanupParts, NEEDS_SPLIT } from "../../utils/mediaSplitter.js";
 
@@ -13,11 +15,27 @@ const HELP =
   "🔗 yt <رابط>         — تحميل مباشر\n\n" +
   "🎚 الجودة: صوت 128kbps | فيديو 360p";
 
+async function search(query, limit = 10) {
+  const result = await vreden.search(query);
+  if (!result?.status || !Array.isArray(result.results)) {
+    throw new Error("لا توجد نتائج من Vreden");
+  }
+  return result.results.slice(0, limit).map((item) => ({
+    url: item.url || (item.videoId ? `https://www.youtube.com/watch?v=${item.videoId}` : null),
+    title: item.title || item.name || "YouTube video",
+    duration: item.duration?.seconds || item.seconds || item.duration || 0,
+    uploader: item.author?.name || item.author || item.channel?.name || item.channel || "",
+  })).filter((r) => r.url);
+}
+
 async function downloadAndSend(api, threadID, messageID, ytUrl, wantMp4, listMsgId = null) {
   let filePath = null;
   let partPaths = [];
   try {
-    ({ filePath } = await downloadWithFallback(ytUrl, wantMp4));
+    const media = wantMp4
+      ? await downloadYoutubeVideo(ytUrl, 360)
+      : await downloadYoutubeAudio(ytUrl, "mp3");
+    filePath = media.filePath;
     const { size } = await fs.stat(filePath);
     const files = NEEDS_SPLIT(size)
       ? (partPaths = await splitFile(filePath, wantMp4 ? "mp4" : "mp3"))
@@ -28,7 +46,7 @@ async function downloadAndSend(api, threadID, messageID, ytUrl, wantMp4, listMsg
     global.safeSend(api, "❌ تعذّر تحميل الملف.", threadID, null, messageID);
   } finally {
     if (partPaths.length) await cleanupParts(partPaths);
-    await cleanTemp(filePath);
+    if (filePath) await removeTempFile(filePath);
   }
 }
 
@@ -40,7 +58,7 @@ export default {
     role: 0,
     countDown: 0,
     category: "وسائط وتحميل",
-    description: "تحميل YouTube عبر yy أولاً مع مزودات احتياطية — أضف s لعرض قائمة، وmp4 للفيديو",
+    description: "تحميل YouTube عبر yy (البحث عبر vreden) — أضف s لعرض قائمة، وmp4 للفيديو",
     usage: [
       "{pn}يوتيوب <اسم> — تحميل أول نتيجة مباشرة (MP3)",
       "{pn}يوتيوب s <اسم> — عرض قائمة نتائج",
@@ -69,12 +87,12 @@ export default {
 
     try {
       if (!showList) {
-        const [first] = await searchWithFallback(query, 1);
+        const [first] = await search(query, 1);
         if (!first?.url) throw new Error("no results");
         return await downloadAndSend(api, threadID, messageID, first.url, wantMp4);
       }
 
-      const list = (await searchWithFallback(query, 10)).slice(0, 10);
+      const list = (await search(query, 10)).slice(0, 10);
       const sent = await new Promise((res, rej) =>
         global.safeSend(api, buildListText(list, wantMp4), threadID,
           (err, info) => (err ? rej(err) : res(info)), messageID)

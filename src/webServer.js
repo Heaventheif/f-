@@ -15,7 +15,8 @@
 
 import { timingSafeEqual } from "node:crypto";
 import fs                  from "fs-extra";
-import { searchWithFallback, downloadWithFallback } from "./utils/ytProviders.js";
+import vreden from "@vreden/youtube_scraper";
+import { downloadYoutubeAudio, downloadYoutubeVideo } from "./utils/yyApi.js";
 
 // ── مقارنة توكن آمنة زمنياً (يُغلق timing-attack على /yt/*) ────────────────
 function safeTokenEqual(a, b) {
@@ -147,7 +148,16 @@ function startWebServer() {
           const query = (body?.query || "").trim();
           const limit = Math.min(parseInt(body?.limit || 10), 15);
           if (!query) return json({ error: "query مطلوب" }, 400);
-          const results = await searchWithFallback(query, limit);
+          const result = await vreden.search(query);
+          if (!result?.status || !Array.isArray(result.results)) {
+            return json({ error: "لا توجد نتائج" }, 404);
+          }
+          const results = result.results.slice(0, limit).map((item) => ({
+            url: item.url || (item.videoId ? `https://www.youtube.com/watch?v=${item.videoId}` : null),
+            title: item.title || "YouTube video",
+            duration: item.duration?.seconds || item.duration || 0,
+            uploader: item.author?.name || item.author || "",
+          })).filter((r) => r.url);
           return json({ results });
         } catch (e) {
           console.error("[YT/search]", e.message);
@@ -164,14 +174,12 @@ function startWebServer() {
           const body = await req.json().catch(() => ({}));
           const url  = (body?.url || "").trim();
           if (!url) return json({ error: "url مطلوب" }, 400);
-          const dl   = await downloadWithFallback(url, false);
-          tmpPath    = dl.filePath;
+          const dl = await downloadYoutubeAudio(url, "mp3");
+          tmpPath = dl.filePath;
           return streamFile(tmpPath, {
             "Content-Type":        "audio/mpeg",
             "Content-Disposition": `attachment; filename="${encodeURIComponent(dl.title)}.mp3"`,
             "X-Title":     encodeURIComponent(dl.title),
-            "X-Duration":  String(dl.duration),
-            "X-Uploader":  encodeURIComponent(dl.uploader),
           });
         } catch (e) {
           if (tmpPath) fs.remove(tmpPath).catch(() => {});
@@ -189,14 +197,12 @@ function startWebServer() {
           const body = await req.json().catch(() => ({}));
           const url  = (body?.url || "").trim();
           if (!url) return json({ error: "url مطلوب" }, 400);
-          const dl   = await downloadWithFallback(url, true, { maxHeight: 720 });
-          tmpPath    = dl.filePath;
+          const dl = await downloadYoutubeVideo(url, 720);
+          tmpPath = dl.filePath;
           return streamFile(tmpPath, {
             "Content-Type":        "video/mp4",
             "Content-Disposition": `attachment; filename="${encodeURIComponent(dl.title)}.mp4"`,
             "X-Title":     encodeURIComponent(dl.title),
-            "X-Duration":  String(dl.duration),
-            "X-Uploader":  encodeURIComponent(dl.uploader),
           });
         } catch (e) {
           if (tmpPath) fs.remove(tmpPath).catch(() => {});

@@ -1,7 +1,6 @@
 "use strict";
 import fs from "fs-extra";
-import { getTiktokApiUrl } from "../../utils/yyApi.js";
-import { downloadTikTok } from "../../utils/tiktokDownloader.js";
+import { getTiktokApiUrl, downloadYYMedia } from "../../utils/yyApi.js";
 
 const HELP =
   "📺 تيك توك\n\n" +
@@ -45,7 +44,7 @@ async function randomVideo() {
 async function downloadAndSend(api, threadID, messageID, url) {
   let filePath;
   try {
-    const media = await downloadTikTok(url);
+    const media = await downloadYYMedia(url, { type: "video" });
     filePath = media.filePath;
     await global.mediaSendFile(api, filePath, threadID, messageID);
     return true;
@@ -67,7 +66,7 @@ export default {
     role: 0,
     countDown: 5,
     category: "وسائط وتحميل",
-    description: "بحث فيديوهات TikTok عبر tS وتنزيلها عبر Toshiro.",
+    description: "بحث فيديوهات TikTok عبر tS وتنزيلها عبر yy.",
     usage: [
       "{pn}fyp <كلمة بحث أو رابط> — تحميل أول نتيجة",
       "{pn}fyp fyp — فيديو عشوائي",
@@ -81,7 +80,7 @@ export default {
     const raw = args.join(" ").trim();
     const isUrl = /^https?:\/\//i.test(raw);
     try {
-      // التحقق من خدمة البحث قبل طلب النتائج؛ التنزيل يمر عبر Toshiro.
+      // التحقق من خدمة البحث قبل طلب النتائج؛ التنزيل يمر عبر yy.
       if (!isUrl) getTiktokApiUrl();
 
       let videoUrl = raw;

@@ -226,6 +226,7 @@ export const handleEvent = async (rawApi, event) => {
   const handlers = [];
   for (const cmd of global.eventCommands) {
     if (!cmd.onChat) continue;
+    if (cmd.config?.enabled === false) continue; // أمر معطّل عبر cmd-overrides.json
     const hasAtt = (event.attachments?.length > 0);
     if (!event.messageID || (!event.body && !hasAtt)) continue;
     // تجاهل إذا كانت الرسالة تُطلق هذا الأمر بالذات (اسماً أو alias أو nonPrefix)
@@ -236,14 +237,4 @@ export const handleEvent = async (rawApi, event) => {
   }
   // Keep the queue slot until onChat handlers settle too.
   await Promise.allSettled(handlers);
-};
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-core-router',
-  meta: { category: 'core', path: 'src/core/Router.js' },
-  setup(_ctx) {
-    // provides: handleEvent, handleMessage, handleReaction
-  },
 };

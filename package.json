@@ -16,17 +16,16 @@
     "cheerio": "^1.2.0"
   },
   "dependencies": {
-    "bing-translate-api": "^4.2.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
     "fcanew-r3nz75": "^10.1.15",
     "fs-extra": "^11.3.6",
-    "google-translate-api-x": "^10.7.3",
     "mongoose": "^9.7.4",
-    "youtubei.js":"^18.2.0",
+    "youtubei.js": "^18.2.0",
     "request": "npm:@cypress/request@4.0.1",
     "shadowx-tiksr": "^1.1.0",
-    "@vreden/youtube_scraper": "^1.2.9"
+    "@vreden/youtube_scraper": "^1.2.9",
+    "@toil/translate": "^1.10.0"
   },
   "_hardened": "fcanew-r3nz75 merged v4.0 — secureStore+mergeOnSave+rateLimiter+fca-lifecycle+monitor"
 }

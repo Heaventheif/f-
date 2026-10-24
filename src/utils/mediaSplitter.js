@@ -96,6 +96,9 @@ async function splitFile(filePath, ext = "mp4") {
       err.code = "FILE_TOO_LARGE";
       throw err;
     }
+    // On success: workDir is NOT removed here — callers use cleanupParts()
+    // which correctly removes each part file and then the containing directory.
+    // This ensures the caller has time to consume the files before cleanup.
     return parts;
   } catch (e) {
     // On error: clean up the entire work dir (parts are unusable)
@@ -104,9 +107,6 @@ async function splitFile(filePath, ext = "mp4") {
     const err = new Error(`تعذّر تقسيم الملف: ${e.message}`);
     err.code = "FILE_TOO_LARGE";
     throw err;
-    // On success: workDir is NOT removed here — callers use cleanupParts()
-    // which correctly removes each part file and then the containing directory.
-    // This ensures the caller has time to consume the files before cleanup.
   }
 }
 async function cleanupParts(partPaths) {
@@ -115,13 +115,3 @@ async function cleanupParts(partPaths) {
   await Promise.allSettled([...dirs].map(d => fs.remove(d)));
 }
 export { splitFile, cleanupParts, NEEDS_SPLIT, MAX_PART_BYTES };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-media-splitter',
-  meta: { category: 'utils', path: 'src/utils/mediaSplitter.js' },
-  setup(_ctx) {
-    // provides: MAX_PART_BYTES, NEEDS_SPLIT, cleanupParts, splitFile
-  },
-};

@@ -268,13 +268,3 @@ setInterval(() => {
 }, 30 * 60 * 1000).unref();
 
 export { gatedSend, prioritySend, mediaSend, mediaSendFile, wrapApiForSafety, cleanupIdleThreadGates, directSend, directSendParts };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-send',
-  meta: { category: 'utils', path: 'src/utils/send.js' },
-  setup(_ctx) {
-    // Provides shared text, priority, media, and multipart send helpers.
-  },
-};

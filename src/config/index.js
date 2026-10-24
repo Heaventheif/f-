@@ -13,13 +13,3 @@ export function loadConfig(projectRoot) {
   buildRoleSets();
   buildBanSets();
 }
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-config-index',
-  meta: { category: 'config', path: 'src/config/index.js' },
-  setup(_ctx) {
-    // provides: loadConfig
-  },
-};

@@ -22,13 +22,3 @@ function isGroupUnbanRequest(event) {
 }
 global.isBanned = isBanned;
 export { buildBanSets, isBanned, isGroupUnbanRequest };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-ban-list',
-  meta: { category: 'utils', path: 'src/utils/banList.js' },
-  setup(_ctx) {
-    // provides: buildBanSets, isBanned
-  },
-};

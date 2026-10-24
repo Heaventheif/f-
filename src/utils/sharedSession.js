@@ -120,10 +120,3 @@ export async function clearCtx(collectionName, id) {
   } catch (_) {}
   _ram.delete(ramKey(collectionName, id));
 }
-
-// ── Plugin Descriptor ─────────────────────────────────────────────────────────
-export const $plugin = {
-  name:  "xx-utils-shared-session",
-  meta:  { category: "utils", path: "src/utils/sharedSession.js" },
-  setup: (_ctx) => {},
-};

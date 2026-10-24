@@ -17,13 +17,3 @@ function getInternalToken() {
   return process.env.INTERNAL_TOKEN || "";
 }
 export { getHfBase, getHfBaseOrNull, getInternalToken  };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-hf-client',
-  meta: { category: 'utils', path: 'src/utils/hfClient.js' },
-  setup(_ctx) {
-    // provides: getHfBase, getHfBaseOrNull, getInternalToken
-  },
-};

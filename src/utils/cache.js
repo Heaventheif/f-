@@ -47,13 +47,3 @@ function sweep() {
 function size() { return _store.size; }
 export { get, set, del, sweep, size, _bridgePerfManager };
 export default { get, set, del, sweep, size, _bridgePerfManager };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-cache',
-  meta: { category: 'utils', path: 'src/utils/cache.js' },
-  setup(_ctx) {
-    // provides: _bridgePerfManager, del, get, set, size, sweep
-  },
-};

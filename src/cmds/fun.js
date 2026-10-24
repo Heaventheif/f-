@@ -1,6 +1,6 @@
 "use strict";
-// تجميع أوامر الألعاب والترفيه.
-import fact from "./_modules/fact.js";
+// تجميع أوامر الألعاب والترفيه. chess يحتفظ بـ onChat الخاصة به كما هي.
 import animal from "./_modules/animal.js";
+import chess from "./_modules/chess.js";
 
-export const commands = [fact, animal];
+export const commands = [animal, chess];

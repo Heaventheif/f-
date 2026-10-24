@@ -42,12 +42,3 @@ export function startCleanupInterval() {
   // إبقاء العملية حية بعد SIGTERM في حالة التخلص اللطيف من الموارد.
 }, 10 * 60 * 1000).unref();
 }
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-events-on-ready',
-  meta: { category: 'event', path: 'src/events/onReady.js' },
-  setup(_ctx) {
-    // provides: startCleanupInterval
-  },
-};

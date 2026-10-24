@@ -7,13 +7,3 @@ export function checkAuth(senderID, command, botIndex = null, isGroupAdmin = fal
   const effectiveRole = (isGroupAdmin && role < 1) ? 1 : role;
   return effectiveRole < reqRole;
 }
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-middlewares-auth',
-  meta: { category: 'middleware', path: 'src/middlewares/auth.js' },
-  setup(_ctx) {
-    // provides: checkAuth
-  },
-};

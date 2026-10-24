@@ -259,13 +259,3 @@ export default Object.assign(request, {
   defaults,
   interceptors,
 });
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-fetch-http',
-  meta: { category: 'utils', path: 'src/utils/fetchHttp.js' },
-  setup(_ctx) {
-    // see module exports
-  },
-};

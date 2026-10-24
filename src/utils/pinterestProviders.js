@@ -71,13 +71,3 @@ export async function downloadImagesWithLimit(urls, tmpDir, limit = 6) {
   await Promise.all(Array.from({ length: Math.min(limit, urls.length) }, worker));
   return downloaded;
 }
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-pinterest-providers',
-  meta: { category: 'utils', path: 'src/utils/pinterestProviders.js' },
-  setup(_ctx) {
-    // provides: downloadImagesWithLimit, searchImagesWithFallback
-  },
-};

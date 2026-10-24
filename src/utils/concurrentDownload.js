@@ -20,13 +20,3 @@ export async function downloadWithLimit(items, fetchFn, limit = 6) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
 }
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-concurrent-download',
-  meta: { category: 'utils', path: 'src/utils/concurrentDownload.js' },
-  setup(_ctx) {
-    // provides: downloadWithLimit
-  },
-};

@@ -148,13 +148,3 @@ function buildCommandContext({ api, event, args = [], role = 0, prefix = "", isG
 }
 
 export { buildMessageAPI, buildCommandContext, getReplyTargetID };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-core-context',
-  meta: { category: 'core', path: 'src/core/Context.js' },
-  setup(_ctx) {
-    // provides: buildCommandContext, buildMessageAPI
-  },
-};

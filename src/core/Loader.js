@@ -116,8 +116,9 @@ export async function loadCommands(commandsDir) {
   }
 
   // تبديل ذري: الرسائل الواردة أثناء التحميل تجد global.commands كاملاً دائماً
-  global.commands.clear();
-  for (const [k, v] of newCommands) global.commands.set(k, v);
+  // استبدال المرجع بإسناد واحد: لا نافذة يكون فيها global.commands فارغًا/ناقصًا.
+  // (كل القرّاء — Router وhelp وwebServer — يقرؤون global.commands عند كل استدعاء.)
+  global.commands      = newCommands;
   global.eventCommands = newEventCmds;
 
   console.log(`[INFO] تم تحميل ${global.commands.size} أمر من أصل ${filePaths.length} ملف`);
@@ -125,12 +126,3 @@ export async function loadCommands(commandsDir) {
 }
 
 export { HANDLER_KEYS };
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-core-loader',
-  meta: { category: 'core', path: 'src/core/Loader.js' },
-  setup(_ctx) {
-    // provides: HANDLER_KEYS, loadCommands
-  },
-};

@@ -89,13 +89,3 @@ async function streamAndSend(api, threadID, mediaUrl, title, ext = "mp4", replyT
   }
 }
 export { streamAndSend, downloadToTemp, fetchStream };
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-media-stream',
-  meta: { category: 'utils', path: 'src/utils/mediaStream.js' },
-  setup(_ctx) {
-    // provides: downloadToTemp, fetchStream, streamAndSend
-  },
-};

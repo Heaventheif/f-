@@ -39,13 +39,3 @@ export function buildListText(results, wantMp4) {
   text += `تفاعل بالإيموجي لاختيار الأغنية\n⏳ تنتهي بعد دقيقتين`;
   return text;
 }
-
-// ─── Plugin Descriptor ──────────────────────────────────────────
-/** @type {import('../plugin-provider.js').XxPlugin} */
-export const $plugin = {
-  name: 'xx-utils-reaction-picker',
-  meta: { category: 'utils', path: 'src/utils/reactionPicker.js' },
-  setup(_ctx) {
-    // provides: EMOJI_PAIRS, attachReactionPicker, buildListText
-  },
-};

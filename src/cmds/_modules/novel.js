@@ -151,7 +151,7 @@ async function translateBatch(paragraphs) {
   if (!paragraphs?.length) return [];
   const arabicChars = paragraphs.join("").match(/[\u0600-\u06FF]/g);
   if (arabicChars && arabicChars.length > 50) return paragraphs;
-  const MAX_CHUNK = 3800;
+  const MAX_CHUNK = 40_000; // أقل من MAX_TEXT_LEN في translator.js (45k)
   const SEP = " ||| ";
   const safeParagraphs = paragraphs.flatMap(p => splitLongParagraph(p, MAX_CHUNK));
   const chunks = [];
