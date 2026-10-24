@@ -1,0 +1,98 @@
+"use strict";
+import http from "../../utils/fetchHttp.js";
+import fs from "fs-extra";
+import os from "os";
+import path from "path";
+import { translateToEnglish } from "../../utils/translator.js";
+const API_BASE = "https://t2i.anbuinfosec.workers.dev";
+const STYLE_PRESETS = {
+  "anime":    "anime style, vibrant colors",
+  "realistic":"photorealistic, 4k, detailed",
+  "pixel":    "pixel art, retro game style",
+  "sketch":   "pencil sketch, hand-drawn",
+  "watercolor":"watercolor painting, soft brushstrokes",
+};
+export default {
+  config: {
+    name: "img",
+    aliases: ["تخيل"],
+    version: "1.0.0",
+    role: 0,
+    countDown: 2,
+    category: "ذكاء اصطناعي",
+    description: "توليد صورة بالذكاء الاصطناعي من وصف نصي (مع دعم أنماط متعددة)",
+    usage: [
+      "{pn}imagine <وصف الصورة> — يولّد صورة",
+      "{pn}imagine anime <وصف> — نمط أنيمي",
+      "{pn}imagine realistic <وصف> — نمط واقعي",
+      "{pn}imagine styles — عرض الأنماط المتاحة",
+    ],
+  },
+  onStart: async ({ api, event, args, message }) => {
+    const { threadID, messageID } = event;
+    if (!args[0]) {
+      return message.reply(
+        "🎨 توليد صور بالذكاء الاصطناعي\n\n" +
+        "📝 الاستخدام: imagine <وصف الصورة>\n" +
+        "💡 مثال: imagine cyberpunk cat in the rain\n\n" +
+        "🎭 الأنماط المتاحة: anime | realistic | pixel | sketch | watercolor\n" +
+        "مثال: imagine anime فتاة تحت المطر"
+      );
+    }
+    if (args[0].toLowerCase() === "styles") {
+      return message.reply(
+        "🎭 الأنماط المتاحة:\n" +
+        Object.entries(STYLE_PRESETS)
+          .map(([k, v]) => `• ${k} — ${v}`)
+          .join("\n")
+      );
+    }
+    let style = null;
+    let promptArgs = [...args];
+    if (STYLE_PRESETS[args[0].toLowerCase()]) {
+      style = STYLE_PRESETS[promptArgs.shift().toLowerCase()];
+    }
+    const rawPrompt = promptArgs.join(" ").trim();
+    if (!rawPrompt) {
+      return message.reply("❓ اكتب وصف الصورة بعد اسم النمط.");
+    }
+    const prompt = rawPrompt;
+    let tmpFile;
+    try {
+      let englishPrompt = await translateToEnglish(prompt);
+      if (style) englishPrompt = `${englishPrompt}, ${style}`;
+      const statusMsg = await new Promise((res, rej) =>
+        global.safeSend(api, "🎨 جاري توليد الصورة...", threadID, (e, i) => e ? rej(e) : res(i), messageID)
+      );
+      const res = await http.get(`${API_BASE}/${encodeURIComponent(englishPrompt)}`, {
+        responseType: "arraybuffer",
+        timeout: 60000,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      const buf = Buffer.from(res.data);
+      if (buf.length < 1000) throw new Error("بيانات الصورة فارغة أو قصيرة جداً");
+      tmpFile = path.join(os.tmpdir(), `imagine_${Date.now()}.jpg`);
+      await fs.writeFile(tmpFile, buf);
+      const captionParts = [`🧠 الوصف: ${prompt}`];
+      if (englishPrompt !== prompt) captionParts.push(`🌐 EN: ${englishPrompt}`);
+      if (style) captionParts.push(`🎭 نمط: ${style}`);
+      try { if (statusMsg?.messageID) await api.unsendMessage(statusMsg.messageID, threadID); } catch (_) {}
+      await new Promise((resolve, reject) =>
+        global.safeSend(
+          api,
+          { body: captionParts.join("\n"), attachment: fs.createReadStream(tmpFile) },
+          threadID,
+          (err) => (err ? reject(err) : resolve()),
+          messageID
+        )
+      );
+    } catch (err) {
+      const errMsg = err.code === "ECONNABORTED"
+        ? "⏱ انتهت مهلة التوليد، حاول لاحقاً."
+        : `❌ فشل توليد الصورة: ${err.message?.substring(0, 100)}`;
+      global.safeSend(api, errMsg, threadID, null, messageID);
+    } finally {
+      if (tmpFile) fs.remove(tmpFile).catch(() => {});
+    }
+  },
+};

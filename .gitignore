@@ -1,0 +1,18 @@
+node_modules/
+.env
+.env.*
+*.log
+
+# Credentials and persistent runtime state
+appstate*.json
+appstate*.enc
+/data/
+/Fca_Database/
+/temp/
+/botNames.json
+/cmd-overrides.json
+/note-schedules.json
+
+# Build and editor artifacts
+.DS_Store
+*.tmp

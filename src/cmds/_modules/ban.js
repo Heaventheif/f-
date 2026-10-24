@@ -1,0 +1,103 @@
+"use strict";
+
+const config = {
+  name: "ban",
+  aliases: ["حظر"],
+  version: "1.0.0",
+  countDown: 3,
+  role: 2,
+  groupOnly: true,
+  description: { ar: "إدارة حظر المجموعات والأفراد" },
+  category: "admin",
+  guide: {
+    ar:
+      "{pn} list                  — عرض قوائم الحظر\n" +
+      "{pn} group [GID]           — حظر المجموعة الحالية أو GID\n" +
+      "{pn} user @شخص             — حظر فرد بالمنشن/الرد/UID\n" +
+      "{pn} ungroup [GID]         — إزالة حظر مجموعة\n" +
+      "{pn} unuser @شخص           — إزالة حظر فرد",
+  },
+};
+
+function idsFromEvent(event, args = []) {
+  const ids = Object.keys(event?.mentions || {}).map(String);
+  const replyID = event?.messageReply?.senderID || event?.messageReply?.author;
+  if (replyID && !ids.includes(String(replyID))) ids.push(String(replyID));
+  for (const value of args) {
+    if (/^\d{6,}$/.test(String(value)) && !ids.includes(String(value))) ids.push(String(value));
+  }
+  return ids;
+}
+
+function send(api, event, text) {
+  return api.sendMessage(text, event.threadID, null, event.messageID);
+}
+
+async function banGroup(api, event, Threads, args) {
+  const targetID = String(args[0] || event.threadID).trim();
+  if (!/^\d{6,}$/.test(targetID)) return send(api, event, "⚠️ أدخل GID صحيحاً (أرقام فقط).");
+  if (global._bannedGroups?.has(targetID)) return send(api, event, `⚠️ المجموعة محظورة بالفعل.\nGID: ${targetID}`);
+  await Threads.setData(targetID, { banned: true, bannedBy: String(event.senderID ?? "") });
+  return send(api, event, `🚫 تم حظر المجموعة.\nGID: ${targetID}`);
+}
+
+async function unbanGroup(api, event, Threads, args) {
+  const targetID = String(args[0] || event.threadID).trim();
+  if (!/^\d{6,}$/.test(targetID)) return send(api, event, "⚠️ أدخل GID صحيحاً (أرقام فقط).");
+  if (!global._bannedGroups?.has(targetID)) return send(api, event, `ℹ️ المجموعة غير محظورة.\nGID: ${targetID}`);
+  await Threads.setData(targetID, { banned: false, unbannedBy: String(event.senderID ?? "") });
+  return send(api, event, `✅ تمت إزالة حظر المجموعة.\nGID: ${targetID}`);
+}
+
+async function banUsers(api, event, Users, args, remove = false) {
+  const ids = idsFromEvent(event, args);
+  if (!ids.length) return send(api, event, "⚠️ قم بمنشن الشخص أو الرد على رسالته أو أدخل UID صحيحاً.");
+  const results = [];
+  for (const uid of ids) {
+    try {
+      const already = global._bannedUsers?.has(String(uid));
+      if (remove) {
+        if (!already) results.push(`ℹ️ ${uid} غير محظور.`);
+        else { await Users.setData(uid, { banned: false }); results.push(`✅ أزيل حظر ${uid}.`); }
+      } else if (already) {
+        results.push(`⚠️ ${uid} محظور بالفعل.`);
+      } else {
+        await Users.setData(uid, { banned: true, bannedBy: String(event.senderID ?? "") });
+        results.push(`🚫 تم حظر ${uid}.`);
+      }
+    } catch (err) {
+      console.warn(`[BAN:${remove ? "UNUSER" : "USER"}] ${uid}`, err?.message || err);
+      results.push(`❌ فشل تحديث حظر ${uid}.`);
+    }
+  }
+  return send(api, event, results.join("\n"));
+}
+
+function listBans(api, event) {
+  const groups = [...(global._bannedGroups || [])].map(String).sort();
+  const users = [...(global._bannedUsers || [])].map(String).sort();
+  const format = (items) => items.length ? items.join(", ") : "لا يوجد";
+  return send(api, event,
+    `🚫 قائمة الحظر\n\n` +
+    `المجموعات (${groups.length}):\n${format(groups)}\n\n` +
+    `الأفراد (${users.length}):\n${format(users)}`
+  );
+}
+
+export default {
+  config,
+  async run({ api, event, args, Threads, Users, prefix }) {
+    const action = String(args[0] || "list").toLowerCase();
+    try {
+      if (["list", "show", "عرض", "قائمة"].includes(action)) return listBans(api, event);
+      if (["group", "المجموعة", "جروب"].includes(action)) return banGroup(api, event, Threads, args.slice(1));
+      if (["ungroup", "unblock-group", "unban-group"].includes(action)) return unbanGroup(api, event, Threads, args.slice(1));
+      if (["user", "person", "فرد", "شخص"].includes(action)) return banUsers(api, event, Users, args.slice(1));
+      if (["unuser", "unblock-user", "unban-user"].includes(action)) return banUsers(api, event, Users, args.slice(1), true);
+      return send(api, event, `❓ الاستخدام:\n${config.guide.ar.replace(/{pn}/g, prefix + "ban")}`);
+    } catch (err) {
+      console.error("[BAN]", err?.message || err);
+      return send(api, event, "❌ تعذّرت عملية الحظر؛ راجع السجل وحاول مجدداً.");
+    }
+  },
+};

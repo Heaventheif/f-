@@ -1,0 +1,60 @@
+import { translateTextStrict } from "../utils/translator.js";
+export default {
+  config: {
+    name: "tr",
+    description: "ترجمة النص إلى أي لغة",
+    usage: [
+      "{pn}tr <رمز_اللغة> <النص> — مثال: {pn}tr en مرحبا",
+      "رد على رسالة + {pn}tr <رمز_اللغة> — ترجمة نص الرسالة المردود عليها",
+    ],
+    aliases: ["ترجم"],
+    category: "أدوات عامة",
+    role: 0,
+    countDown: 5,
+    nonPrefix: true
+  },
+  onStart: async ({ api, event, args, message }) => {
+    const { threadID, messageID, messageReply, body } = event;
+    const knownLangCodes = [
+      "ar","en","fr","es","de","it","pt","ru","zh","zh-cn","zh-tw","ja","ko",
+      "tr","nl","pl","sv","fi","da","no","el","he","hi","ur","fa","id","ms",
+      "th","vi","ro","hu","cs","sk","uk","bg","sr","hr","sl","lt","lv","et",
+      "az","ka","am","sw","bn","ta","te","ml","mr","gu","pa","ne","si","km",
+      "lo","my","mn","kk","uz","tg","ps","ku","yo","ig","ha","zu","xh","af",
+      "sq","hy","eu","be","bs","ca","cy","eo","fy","ga","gl","is","jw","kn",
+      "la","lb","mg","mi","mk","mt","ny","or","rw","sd","sm","sn","so","st",
+      "su","tl","tt","ug","yi"
+    ];
+    let targetLang;
+    let textToTranslate = "";
+    if (args.length === 0) {
+      if (messageReply && messageReply.body) {
+        targetLang = "ar";
+        textToTranslate = messageReply.body;
+      } else {
+        return global.safeSend(api, "الرجاء كتابة النص أو الرد على رسالة لترجمتها.\nالاستخدام: tr <رمز_اللغة> <النص>", threadID, null, messageID);
+      }
+    } else if (knownLangCodes.includes(args[0].toLowerCase()) && (args.length > 1 || (messageReply && messageReply.body))) {
+      targetLang = args[0].toLowerCase();
+      if (args.length > 1) {
+        textToTranslate = args.slice(1).join(" ");
+      } else {
+        textToTranslate = messageReply.body;
+      }
+    } else {
+      targetLang = "ar";
+      textToTranslate = args.join(" ");
+    }
+    if (textToTranslate.length > 5000) {
+      return global.safeSend(api, "النص طويل جداً؛ الحد الأقصى 5000 حرف.", threadID, null, messageID);
+    }
+    try {
+      const translatedText = await translateTextStrict(textToTranslate, targetLang);
+      if (!translatedText?.trim()) throw new Error("تعذر الوصول إلى مزودي الترجمة.");
+      await global.safeSend(api, translatedText.trim(), threadID, null, messageID);
+    } catch (error) {
+      const msg = "تعذرت الترجمة الآن؛ يرجى المحاولة مرة أخرى لاحقاً.";
+      await global.safeSend(api, msg, threadID, null, messageID);
+    }
+  }
+};

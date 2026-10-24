@@ -1,0 +1,442 @@
+"use strict";
+import http from "../../utils/fetchHttp.js";
+import { loadCtx, saveCtx, clearCtx } from "../../utils/sharedSession.js";
+import { buildGroupPrompt, resolveGroupUsername } from "../../utils/groupConversation.js";
+const COLLECTION        = "gptx_sessions";
+const COLLECTION_ACTIVE = "gptx_active";
+const BASE_CEDDS    = "https://ceddsrestapi.vercel.app";
+const BASE_TOSHIRO  = "https://toshiro-api-editz6t9.vercel.app";
+const BASE_BETADASH = "https://betadash-api-swordslush-production.up.railway.app";
+const BASE_FAHIM    = "https://smfahim.xyz";
+const MAX_HISTORY   = 6;
+const TIMEOUT_MS    = 45000;
+const SYSTEM_TRIGGERS = ["gptx ", "gptx", "ai ", "ذكاء "];
+const CMD_ON  = ["on",  "تفعيل", "شغل",  "يلا"];
+const CMD_OFF = ["off", "إيقاف", "وقف",  "سكت", "اسكت"];
+const BOT_CMD_PREFIXES = [".", "/", "!", "#", "-"];
+// الرسالة التي تُطلق أمرًا مسجَّلًا (بأي بادئة مُعدّة، ومنها البادئة الفارغة) يعالجها Router — لا نردّ عليها هنا
+function isRegisteredCommand(text) {
+  const prefixes = Array.isArray(global.config?.Prefix) ? global.config.Prefix : [""];
+  for (const p of prefixes) {
+    const pre = String(p ?? "");
+    if (!text.startsWith(pre)) continue;
+    const word = text.slice(pre.length).trim().split(/\s+/)[0]?.toLowerCase();
+    if (word && global.commands?.has(word)) return true;
+  }
+  return false;
+}
+
+// ── Text endpoints (fallback chain) ──────────────────────────────────────────
+// base: URL أساسي | method: GET أو POST (افتراضي POST) | queryKey: اسم الـ param إذا GET
+const TEXT_ENDPOINTS = [
+  // CEDDS
+  { name: "overchat-claude",   base: BASE_CEDDS,    path: "/ai/overchat-claude",   bodyKey: "message" },
+  { name: "overchat-deepseek", base: BASE_CEDDS,    path: "/ai/overchat-deepseek", bodyKey: "message" },
+  { name: "overchat-qwen",     base: BASE_CEDDS,    path: "/ai/overchat-qwen",     bodyKey: "message" },
+  { name: "overchat",          base: BASE_CEDDS,    path: "/ai/overchat",          bodyKey: "message" },
+  { name: "aichatting",        base: BASE_CEDDS,    path: "/ai/aichatting",        bodyKey: "message", extra: { model: "gpt-4o-mini" } },
+  { name: "youai",             base: BASE_CEDDS,    path: "/ai/youai",             bodyKey: "query"   },
+  { name: "feloai",            base: BASE_CEDDS,    path: "/ai/feloai",            bodyKey: "query"   },
+  { name: "chatgpt",           base: BASE_CEDDS,    path: "/ai/chatgpt",           bodyKey: "prompt",  extra: { model: "chatgpt4" } },
+  { name: "chatplus",          base: BASE_CEDDS,    path: "/ai/chatplus",          bodyKey: "message", extra: { model: "gpt-4o-mini" } },
+  { name: "deepai",            base: BASE_CEDDS,    path: "/ai/deepai",            bodyKey: "message", extra: { model: "deepseek-v3.2" } },
+  { name: "goody-cedds",       base: BASE_CEDDS,    path: "/ai/goody",             bodyKey: "question" },
+  // Toshiro
+  { name: "toshiro-goody",     base: BASE_TOSHIRO,  path: "/api/ai/GoodyAi",       method: "GET", queryKey: "question", replyKey: "answer" },
+  // Betadash
+  { name: "betadash-goody",    base: BASE_BETADASH, path: "/goody",                method: "GET", queryKey: "ask",      replyKey: "response" },
+  { name: "betadash-opera",    base: BASE_BETADASH, path: "/opera",                method: "GET", queryKey: "ask",      replyKey: "message"  },
+  // Fahim Gemini V3 — آخر مزود احتياطي، تم التحقق من شكل الرد العربي.
+  { name: "fahim-gemini-v3",   base: BASE_FAHIM,    path: "/ai/gemini/v3",         method: "GET", queryKey: "prompt",  replyKey: "result", timeoutMs: 12000 },
+];
+
+// ── Image-analysis endpoints (تحليل صورة مرسلة) ────────────────────────────
+const IMAGE_ENDPOINTS = [
+  { name: "chipp",    base: BASE_CEDDS, path: "/ai/chipp",    bodyKey: "message", imgKey: "url"       },
+  { name: "deepchat", base: BASE_CEDDS, path: "/ai/deepchat", bodyKey: "text",    imgKey: "image_url" },
+];
+
+// ── Image-generation endpoints (توليد صورة من نص) ──────────────────────────
+const IMAGEGEN_ENDPOINTS = [
+  { name: "toshiro-gptimg", base: BASE_TOSHIRO, path: "/api/ai/gptimg",  method: "GET", queryKey: "prompt", replyKey: "result.image" },
+  { name: "toshiro-mj",     base: BASE_TOSHIRO, path: "/api/image/mj",   method: "GET", queryKey: "prompt", replyKey: "result.image" },
+];
+
+// ── AI-detect endpoint ───────────────────────────────────────────────────────
+const DETECT_ENDPOINT = { base: BASE_BETADASH, path: "/aidetect", method: "GET", queryKey: "text" };
+
+const REPLY_KEYS = ["result", "reply", "answer", "response", "message"];
+const _modelMap = new Map();
+const MODEL_ALIASES = {
+  "claude":           "overchat-claude",
+  "كلود":             "overchat-claude",
+  "deepseek":         "overchat-deepseek",
+  "ديب سيك":          "overchat-deepseek",
+  "ديبسيك":           "overchat-deepseek",
+  "qwen":             "overchat-qwen",
+  "كوين":             "overchat-qwen",
+  "gpt":              "overchat",
+  "gpt4o":            "overchat",
+  "gpt-4o":           "overchat",
+  "جيبيتي":           "overchat",
+  "mini":             "aichatting",
+  "gpt-4o-mini":      "aichatting",
+  "youai":            "youai",
+  "feloai":           "feloai",
+  "chatgpt":          "chatgpt",
+  "chatplus":         "chatplus",
+  "deepai":           "deepai",
+  "goody":            "toshiro-goody",
+  "opera":            "betadash-opera",
+};
+const MODEL_DISPLAY = {
+  "overchat-claude":   "Claude 🧠",
+  "overchat-deepseek": "DeepSeek 🔵",
+  "overchat-qwen":     "Qwen 🟠",
+  "overchat":          "GPT-4o 🟢",
+  "aichatting":        "GPT-4o Mini ⚡",
+  "youai":             "YouAI 🌐",
+  "feloai":            "FeloAI 🌀",
+  "chatgpt":           "ChatGPT 🤖",
+  "chatplus":          "ChatPlus 💬",
+  "deepai":            "DeepAI 🔷",
+  "toshiro-goody":     "Goody (Toshiro) ✨",
+  "betadash-opera":    "Opera (Betadash) 🎭",
+};
+function getOrderedEndpoints(threadID) {
+  const chosen = _modelMap.get(threadID);
+  if (!chosen) return TEXT_ENDPOINTS;
+  const primary = TEXT_ENDPOINTS.find(e => e.name === chosen);
+  if (!primary) return TEXT_ENDPOINTS;
+  return [primary, ...TEXT_ENDPOINTS.filter(e => e.name !== chosen)];
+}
+function cleanReply(text) {
+  if (!text) return text;
+  return text
+    .replace(/@DONE@/gi, '')
+    .replace(/@\w+@/g, '')
+    .replace(/(-=\s*|\s*=-)+/g, ' ')
+    .replace(/\*{2,}/g, '')
+    .replace(/_{2,}/g, '')
+    .replace(/#{1,6}\s*/g, '')
+    .replace(/[-=]{3,}/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+const _activeMap  = new Map(); 
+const _historyMap = new Map(); 
+async function isActive(threadID) {
+  if (_activeMap.has(threadID)) return _activeMap.get(threadID);
+  const state = await loadCtx(COLLECTION_ACTIVE, threadID);
+  const val   = Array.isArray(state) ? false : state?.active === true;
+  _activeMap.set(threadID, val);
+  return val;
+}
+async function setActive(threadID, value) {
+  _activeMap.set(threadID, value); 
+  await saveCtx(COLLECTION_ACTIVE, threadID, { active: value }); 
+}
+async function loadHistory(threadID) {
+  if (_historyMap.has(threadID)) return _historyMap.get(threadID);
+  const h = (await loadCtx(COLLECTION, threadID)) || [];
+  _historyMap.set(threadID, h);
+  return h;
+}
+async function saveHistory(threadID, history) {
+  _historyMap.set(threadID, history);
+  await saveCtx(COLLECTION, threadID, history);
+}
+async function clearHistory(threadID) {
+  _historyMap.delete(threadID);
+  _activeMap.delete(threadID);
+  await clearCtx(COLLECTION, threadID);
+}
+function extractReply(data, replyKeys) {
+  for (const key of replyKeys) {
+    // support dot-notation keys like "result.image"
+    const parts = key.split(".");
+    let val = data;
+    for (const p of parts) val = val?.[p];
+    if (val && typeof val === "string" && val.trim()) return val.trim();
+  }
+  if (data?.data) return extractReply(data.data, replyKeys);
+  return null;
+}
+// استخراج قيمة بـ dot-notation مثل "result.image"
+function deepGet(obj, dotKey) {
+  return dotKey.split(".").reduce((v, k) => v?.[k], obj);
+}
+async function callEndpoint(endpoint, msg, imgUrl = null) {
+  const url    = `${endpoint.base}${endpoint.path}`;
+  const method = (endpoint.method || "POST").toUpperCase();
+  const opts   = { timeout: endpoint.timeoutMs || TIMEOUT_MS, headers: { "User-Agent": "Mozilla/5.0" } };
+  let data;
+  if (method === "GET") {
+    const params = new URLSearchParams({ [endpoint.queryKey]: msg });
+    const res = await http.get(`${url}?${params}`, opts);
+    data = res.data;
+  } else {
+    const body = { ...(endpoint.extra || {}), [endpoint.bodyKey]: msg };
+    if (imgUrl && endpoint.imgKey) body[endpoint.imgKey] = imgUrl;
+    opts.headers["Content-Type"] = "application/json";
+    const res = await http.post(url, body, opts);
+    data = res.data;
+  }
+  // إذا كان للـ endpoint replyKey خاص، نستخدمه أولاً
+  if (endpoint.replyKey) {
+    const val = deepGet(data, endpoint.replyKey);
+    if (val && typeof val === "string" && val.trim()) return val.trim();
+  }
+  const reply = extractReply(data, REPLY_KEYS);
+  if (!reply) throw new Error(`[${endpoint.name}] استجابة فارغة أو حقل غير معروف`);
+  return reply;
+}
+// توليد صورة من نص — يرجع URL الصورة
+async function callImageGen(prompt) {
+  const errors = [];
+  for (const ep of IMAGEGEN_ENDPOINTS) {
+    try {
+      const url    = `${ep.base}${ep.path}`;
+      const params = new URLSearchParams({ [ep.queryKey]: prompt });
+      const { data } = await http.get(`${url}?${params}`, { timeout: TIMEOUT_MS, headers: { "User-Agent": "Mozilla/5.0" } });
+      const imgUrl = deepGet(data, ep.replyKey);
+      if (imgUrl && typeof imgUrl === "string") return imgUrl;
+      throw new Error("no image URL in response");
+    } catch (e) {
+      errors.push(`${ep.name}: ${e.message?.substring(0, 80)}`);
+      console.warn(`[GPTX] ${ep.name} failed:`, e.message?.substring(0, 120));
+    }
+  }
+  throw new Error("فشل توليد الصورة:\n" + errors.join("\n"));
+}
+// كشف AI في النص — يرجع نتيجة مقروءة
+async function callAiDetect(text) {
+  const ep  = DETECT_ENDPOINT;
+  const url = `${ep.base}${ep.path}`;
+  const params = new URLSearchParams({ [ep.queryKey]: text });
+  const { data } = await http.get(`${url}?${params}`, { timeout: TIMEOUT_MS, headers: { "User-Agent": "Mozilla/5.0" } });
+  const d = data?.data ?? data;
+  if (!d) throw new Error("استجابة فارغة من aidetect");
+  return d;
+}
+async function fetchImageAsDataUrl(url) {
+  try {
+    const response = await http.get(url, {
+      timeout: 15000,
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.facebook.com/",
+      },
+    });
+    const buffer   = Buffer.from(response.data);
+    const mimeType = response.headers?.["content-type"] || "image/jpeg";
+    const base64   = buffer.toString("base64");
+    return `data:${mimeType};base64,${base64}`;
+  } catch (e) {
+    console.warn("[GPTX] فشل تحميل الصورة:", e.message?.substring(0, 80));
+    return null; 
+  }
+}
+async function callWithFallback(endpoints, msg, imgUrl = null) {
+  const errors = [];
+  for (const ep of endpoints) {
+    try {
+      return await callEndpoint(ep, msg, imgUrl);
+    } catch (e) {
+      errors.push(`${ep.name}: ${e.message?.substring(0, 80)}`);
+      console.warn(`[GPTX] ${ep.name} failed:`, e.message?.substring(0, 120));
+    }
+  }
+  throw new Error("فشلت جميع الـ endpoints:\n" + errors.join("\n"));
+}
+function detectImageUrl(event) {
+  const sources = [
+    ...(event.attachments || []),
+    ...(event.messageReply?.attachments || []),
+  ];
+  for (const att of sources) {
+    if (!att) continue;
+    const type = (att.type || att.attachmentType || "").toLowerCase();
+    if (["photo", "image", "sticker", "animated_image"].includes(type)) {
+      const url =
+        att.largePreviewUrl || att.previewUrl ||
+        att.largePreviewUri || att.previewUri ||
+        att.url || att.uri || att.thumbnailUrl;
+      if (url) return url;
+    }
+  }
+  return null;
+}
+async function handleMessage(api, event, message, prompt, registerReply) {
+  const { threadID, messageID } = event;
+  const lowerPrompt = prompt.trim().toLowerCase();
+  const setMatch = lowerPrompt.match(/^set\s+(.+)$/);
+  if (setMatch) {
+    const alias    = setMatch[1].trim().toLowerCase();
+    const endpName = MODEL_ALIASES[alias];
+    if (!endpName) {
+      const list = Object.keys(MODEL_ALIASES)
+        .filter(k => /^[a-z]/.test(k)) 
+        .join(", ");
+      return message.reply(`❓ نموذج غير معروف: "${alias}"\n\nالنماذج المتاحة:\n${list}`);
+    }
+    _modelMap.set(threadID, endpName);
+    return message.reply(
+      `✅ تم تغيير النموذج إلى: ${MODEL_DISPLAY[endpName]}\n` +
+      `gptx set claude  — للعودة لكلود\n` +
+      `gptx set reset   — للترتيب الافتراضي (أفضل متاح)`
+    );
+  }
+  if (lowerPrompt === "set reset" || lowerPrompt === "reset model") {
+    _modelMap.delete(threadID);
+    return message.reply("🔄 تم إعادة تعيين النموذج للترتيب الافتراضي.");
+  }
+  if (lowerPrompt === "models" || lowerPrompt === "نماذج") {
+    const current = _modelMap.get(threadID);
+    const lines   = Object.entries(MODEL_DISPLAY).map(([k, v]) =>
+      `${current === k ? "✅" : "•"} ${v}  →  gptx set ${TEXT_ENDPOINTS.find(e=>e.name===k)?.name?.replace("overchat-","") ?? k}`
+    );
+    return message.reply(`🤖 النماذج المتاحة:\n\n${lines.join("\n")}\n\nالحالي: ${MODEL_DISPLAY[current] ?? "افتراضي (أفضل متاح)"}`);
+  }
+  if (CMD_ON.includes(lowerPrompt)) {
+    await setActive(threadID, true);
+    return message.reply(
+      "✅ تم تفعيل الوضع التلقائي!\n" +
+      "البوت سيرد على كل رسالة في الغروب.\n" +
+      "لإيقافه: gptx off"
+    );
+  }
+  if (CMD_OFF.includes(lowerPrompt)) {
+    await setActive(threadID, false);
+    return message.reply(
+      "⛔ تم إيقاف الوضع التلقائي.\n" +
+      "البوت سيرد فقط عند استدعائه صراحةً."
+    );
+  }
+  if (lowerPrompt === "clear" || lowerPrompt === "مسح" || lowerPrompt === "reset") {
+    await clearHistory(threadID);
+    return message.reply("🧹 تم مسح ذاكرة المجموعة.");
+  }
+  // ── توليد صورة: gptx img <وصف> ──────────────────────────────────────────
+  const imgMatch = prompt.match(/^img\s+(.+)$/si);
+  if (imgMatch) {
+    const imgPrompt = imgMatch[1].trim();
+    try {
+      const imgUrl = await callImageGen(imgPrompt);
+      const imgStream = await http.get(imgUrl, { responseType: "stream" }).then(r => r.data);
+      return await global.safeSend(api, { body: `🎨 ${imgPrompt}`, attachment: imgStream }, threadID, null, messageID);
+    } catch (e) {
+      return message.reply(`❌ ${e.message}`);
+    }
+  }
+  // ── كشف الذكاء الاصطناعي: gptx detect <نص> ─────────────────────────────
+  const detectMatch = prompt.match(/^detect\s+(.+)$/si) || prompt.match(/^كشف\s+(.+)$/s);
+  if (detectMatch) {
+    const detectText = detectMatch[1].trim();
+    try {
+      const d = await callAiDetect(detectText);
+      const human = d.isHuman ?? "?";
+      const ai    = typeof d.fakePercentage === "number" ? d.fakePercentage : (100 - (d.isHuman ?? 50));
+      const verdict = d.feedback ?? (ai > 50 ? "النص على الأرجح من AI" : "النص على الأرجح بشري");
+      return message.reply(
+        `🔍 نتيجة الكشف:\n\n` +
+        `👤 بشري: ${human}%\n` +
+        `🤖 AI: ${ai}%\n\n` +
+        `📋 ${verdict}`
+      );
+    } catch (e) {
+      return message.reply(`❌ فشل الكشف: ${e.message}`);
+    }
+  }
+  const imageUrl = detectImageUrl(event);
+  if (!prompt && !imageUrl) return message.reply("⚠️ اكتب سؤالاً أو ردّ على صورة.");
+  const history = await loadHistory(threadID);
+  const senderName = await resolveGroupUsername(api, event);
+  const imageOnlyPrompt = `شوف هذه الصورة وعلق عليها بجملة واحدة قصيرة بالدارجة الجزائرية كيما تعلق على صورة صاحبك، بلا إيموجي.`;
+  const groupPrompt = buildGroupPrompt(history, senderName, prompt || "[مرفق صورة]");
+  const finalPrompt = prompt
+    ? `أجب باللغة العربية الفصحى افتراضياً، إلا إذا طلبتُ صراحةً لغة أخرى.\n${groupPrompt}`
+    : `${imageOnlyPrompt}\n${groupPrompt}`;
+  const orderedTextEp = getOrderedEndpoints(threadID);
+  let reply;
+  try {
+    if (imageUrl) {
+      const dataUrl     = await fetchImageAsDataUrl(imageUrl);
+      const effectiveUrl = dataUrl ?? imageUrl; 
+      const imgFallbackMsg = `${finalPrompt}\n[رابط الصورة: ${effectiveUrl}]`;
+      try {
+        reply = await callWithFallback(IMAGE_ENDPOINTS, finalPrompt, effectiveUrl);
+      } catch (_imgErr) {
+        reply = await callWithFallback(orderedTextEp, imgFallbackMsg);
+      }
+    } else {
+      reply = await callWithFallback(orderedTextEp, finalPrompt);
+    }
+  } catch (e) {
+    console.error("[GPTX] All endpoints failed:", e.message);
+    return message.reply(`❌ ${e.message}`);
+  }
+  reply = cleanReply(reply);
+  const updatedHistory = [
+    ...history,
+    { role: "user", username: senderName, content: prompt || "[مرفق صورة]" },
+    { role: "assistant", content: reply  },
+  ].slice(-(MAX_HISTORY * 2));
+  await saveHistory(threadID, updatedHistory);
+  const info = await message.reply(reply);
+  if (registerReply) {
+    registerReply(info.messageID, { threadID }, async ({ api, event, message }) => {
+      const followUp = event.body?.trim() || "";
+      if (!followUp && !event.attachments?.length) return;
+      await handleMessage(api, event, message, followUp, registerReply);
+    });
+  }
+}
+export default {
+  config: {
+    name: "gptx",
+    aliases: ["Ai"],
+    version: "4.2.0",
+    author: "Sunken",
+    countDown: 3,
+    role: 0,
+    usePrefix: false,
+    category: "ذكاء اصطناعي",
+    description: "محادثة AI مشتركة حسب threadID؛ يستطيع كل عضو المتابعة ويُميّز الحوار أسماء المشاركين — تحليل صور وتوليدها، والإجابة بالعربية افتراضياً",
+    usage: [
+      "{pn}gptx <سؤالك> — بدء محادثة",
+      "{pn}gptx on/off — تفعيل/إيقاف الرد التلقائي",
+      "{pn}gptx set <نموذج> — تغيير النموذج (claude/deepseek/qwen/gpt/goody/opera...)",
+      "{pn}gptx models — عرض النماذج المتاحة",
+      "{pn}gptx img <وصف> — توليد صورة بالذكاء الاصطناعي",
+      "{pn}gptx detect <نص> — كشف هل النص من AI أم لا",
+      "رد على صورة + gptx — تحليل الصورة",
+      "يمكن لأي عضو الرد على إجابة البوت لمواصلة نقاش المجموعة",
+      "{pn}gptx مسح — مسح ذاكرة المحادثة",
+    ],
+  },
+  onStart: async ({ api, event, args, message }) => {
+    let prompt = args.join(" ").trim();
+    if (!prompt && event.messageReply) prompt = event.messageReply.body || "";
+    await handleMessage(api, event, message, prompt, message?.registerReply);
+  },
+  onChat: async ({ api, event, message }) => {
+    const { body, threadID } = event;
+    const text  = (body || "").trim();
+    const lower = text.toLowerCase();
+    const hasImage = !!detectImageUrl(event);
+    if (!text && !hasImage) return;
+    const trigger = SYSTEM_TRIGGERS.find((t) => lower.startsWith(t));
+    if (trigger) {
+      const prompt = text.slice(trigger.trim().length).trim();
+      return handleMessage(api, event, message, prompt, message?.registerReply);
+    }
+    if (await isActive(threadID)) {
+      if (text && (BOT_CMD_PREFIXES.some((p) => text.startsWith(p)) || isRegisteredCommand(text))) return;
+      if (!hasImage && text.length < 2) return;
+      return handleMessage(api, event, message, text, message?.registerReply);
+    }
+  },
+};

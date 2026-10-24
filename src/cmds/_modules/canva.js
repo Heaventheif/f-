@@ -1,0 +1,36 @@
+"use strict";
+import fs from "fs-extra";
+import os from "os";
+import path from "path";
+import { fetchImageWithFallback, formatProviderError, validateText, validateUserId } from "../../utils/betadash.js";
+const DESIGNS = [
+  { name: "brat", label: "📝 Brat", text: true },
+  { name: "brick-wall", label: "🧱 Brick Wall" },
+  { name: "city-billboard", label: "🏙️ City Billboard" },
+  { name: "night-city", label: "🌃 Night City" },
+  { name: "wanted-poster", label: "🚨 Wanted Poster" },
+  { name: "rainbow", label: "🌈 Rainbow" },
+  { name: "beautiful", label: "✨ Beautiful" },
+  { name: "calendar", label: "📅 Calendar" },
+];
+const INDEX_KEY = "betadash_canva_index";
+const designByName = new Map(DESIGNS.map(item => [item.name, item]));
+function targetId(event, args) { return validateUserId(Object.keys(event.mentions || {})[0] || event.messageReply?.senderID || args.find(value => /^\d{5,20}$/.test(value)) || event.senderID); }
+function nextDesign(globalData, requested) { if (requested && designByName.has(requested)) return designByName.get(requested); const index = Number(globalData?.get(INDEX_KEY)); const safe = Number.isInteger(index) && index >= 0 && index < DESIGNS.length ? index : 0; globalData?.set(INDEX_KEY, (safe + 1) % DESIGNS.length); return DESIGNS[safe]; }
+function candidates(design, value) { if (design.text) return [{ endpoint: design.name, params: { text: value } }]; return [{ endpoint: design.name, params: { userid: value } }, ...DESIGNS.filter(item => !item.text && item.name !== design.name).slice(0, 2).map(item => ({ endpoint: item.name, params: { userid: value } }))]; }
+export const parseCanvaArgs = (args = []) => { const values = [...args]; const requested = values[0]?.toLowerCase(); if (requested === "list" || requested === "قائمة") return { list: true }; const design = designByName.has(requested) ? requested : null; if (design) values.shift(); return { design, text: values.join(" ").trim() }; };
+export default {
+  config: { name: "canva", aliases: ["لوحة"], version: "2.0.0", role: 0, countDown: 8, category: "ألعاب وترفيه", description: "توليد تصميم صورة أو نص من كتالوج Betadash مع بدائل تلقائية", usage: ["{pn}canva", "{pn}canva @منشن", "{pn}canva brat نص", "{pn}canva list"] },
+  onStart: async ({ api, event, args, message, globalData }) => {
+    const parsed = parseCanvaArgs(args);
+    if (parsed.list) return message.reply(`🎨 التصاميم: ${DESIGNS.map(item => item.name).join(" · ")}\nاستخدم: canva <design> أو canva مع منشن.`);
+    const id = targetId(event, args);
+    const design = nextDesign(globalData, parsed.design);
+    if (!id) return message.reply("⚠️ أرسل UID صحيحاً، أو منشن الشخص، أو رد على رسالته.");
+    const value = design.text ? validateText(parsed.text || "SunkenBot") : id;
+    if (!value) return message.reply("⚠️ اكتب نصاً قصيراً بعد اسم التصميم.");
+    try { await sendImage(api, event, await fetchImageWithFallback(candidates(design, value)), design.label); }
+    catch (error) { console.error("[CANVA]", error.details || error.message); await message.reply(`❌ ${formatProviderError(error)}`); }
+  },
+};
+async function sendImage(api, event, result, label) { const file = path.join(os.tmpdir(), `canva_${Date.now()}.png`); try { await fs.writeFile(file, result.data); await global.safeSend(api, { body: label, attachment: fs.createReadStream(file) }, event.threadID, null, event.messageID); } finally { await fs.remove(file).catch(() => {}); } }

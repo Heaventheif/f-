@@ -1,0 +1,32 @@
+{
+  "name": "SunkenBot",
+  "version": "5.0.0",
+  "description": "SunkenBot v5.0 — modular aggregators + stable utils",
+  "main": "main.js",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3.4"
+  },
+  "scripts": {
+    "build": "bun install --production",
+    "start": "bun --smol main.js",
+    "dev": "bun --watch main.js"
+  },
+  "overrides": {
+    "cheerio": "^1.2.0"
+  },
+  "dependencies": {
+    "bing-translate-api": "^4.2.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "fcanew-r3nz75": "^10.1.15",
+    "fs-extra": "^11.3.6",
+    "google-translate-api-x": "^10.7.3",
+    "mongoose": "^9.7.4",
+    "youtubei.js":"^18.2.0",
+    "request": "npm:@cypress/request@4.0.1",
+    "shadowx-tiksr": "^1.1.0",
+    "@vreden/youtube_scraper": "^1.2.9"
+  },
+  "_hardened": "fcanew-r3nz75 merged v4.0 — secureStore+mergeOnSave+rateLimiter+fca-lifecycle+monitor"
+}
