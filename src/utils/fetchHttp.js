@@ -6,24 +6,81 @@ import { promises as dns } from "dns";
 import net from "net";
 
 // ─── SSRF Guard ─────────────────────────────────────────────────
-function _isPrivateIp(ip) {
-  if (net.isIPv6(ip)) {
-    return ip === "::1" || ip.startsWith("fc00") || ip.startsWith("fe80") || ip === "::" ;
-  }
-  const parts = ip.split(".").map(Number);
-  if (parts.length !== 4 || parts.some(isNaN)) return true; // malformed → block
-  if (parts[0] === 10) return true;                                  // 10.0.0.0/8
-  if (parts[0] === 127) return true;                                 // 127.0.0.0/8
-  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12
-  if (parts[0] === 192 && parts[1] === 168) return true;            // 192.168.0.0/16
-  if (parts[0] === 169 && parts[1] === 254) return true;            // 169.254.0.0/16 (link-local / cloud metadata)
-  if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true; // 100.64.0.0/10 (CGNAT)
-  if (parts[0] === 0) return true;                                   // 0.0.0.0/8
+// الفحص السابق كان يغطي IPv4 الأساسي فقط: لا ::ffff:127.0.0.1 ولا fd00::/8 ولا
+// عناوين متعددة الإرسال. نحلّل العنوان الآن إلى أرقام ونفحص النطاقات المحجوزة.
+function _isPrivateIPv4(p) {
+  const [a, b, c] = p;
+  if (a === 0 || a === 10 || a === 127) return true;           // this-net / خاص / loopback
+  if (a === 100 && b >= 64 && b <= 127) return true;          // CGNAT
+  if (a === 169 && b === 254) return true;                    // link-local + cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;   // IETF + TEST-NET-1
+  if (a === 198 && (b === 18 || b === 19)) return true;       // benchmarking
+  if (a === 198 && b === 51 && c === 100) return true;        // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true;         // TEST-NET-3
+  if (a >= 224) return true;                                  // multicast + reserved + broadcast
   return false;
 }
 
+function _parseIPv6(input) {
+  let ip = String(input).split("%")[0].toLowerCase();
+  if (ip.includes(".")) {                                     // ::ffff:1.2.3.4
+    const i = ip.lastIndexOf(":");
+    const v4 = ip.slice(i + 1).split(".").map(Number);
+    if (v4.length !== 4 || v4.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    ip = `${ip.slice(0, i + 1)}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const rest = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  let groups;
+  if (halves.length === 2) {
+    const fill = 8 - head.length - rest.length;
+    if (fill < 1) return null;
+    groups = [...head, ...Array(fill).fill("0"), ...rest];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+  const nums = groups.map(g => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+  return nums.some(Number.isNaN) ? null : nums;
+}
+
+const _v4FromGroups = (hi, lo) => [hi >> 8, hi & 255, lo >> 8, lo & 255];
+
+function _isPrivateIPv6(g) {
+  if (g.slice(0, 5).every(x => x === 0)) {
+    if (g[5] === 0xffff) return _isPrivateIPv4(_v4FromGroups(g[6], g[7]));   // IPv4-mapped
+    if (g[5] === 0)      return true;                                         // ::, ::1, IPv4-compatible
+  }
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every(x => x === 0)) // NAT64
+    return _isPrivateIPv4(_v4FromGroups(g[6], g[7]));
+  if (g[0] === 0x2002) return _isPrivateIPv4(_v4FromGroups(g[1], g[2]));     // 6to4
+  if ((g[0] & 0xfe00) === 0xfc00) return true;     // fc00::/7  (ULA — يشمل fd00::)
+  if ((g[0] & 0xffc0) === 0xfe80) return true;     // fe80::/10 link-local
+  if ((g[0] & 0xffc0) === 0xfec0) return true;     // fec0::/10 site-local (مهمل)
+  if ((g[0] & 0xff00) === 0xff00) return true;     // ff00::/8 multicast
+  if (g[0] === 0x2001 && g[1] === 0x0db8) return true;   // documentation
+  return false;
+}
+
+export function isPrivateIp(rawIp) {
+  const ip = String(rawIp).replace(/^\[|\]$/g, "");
+  if (net.isIPv6(ip)) {
+    const groups = _parseIPv6(ip);
+    return groups ? _isPrivateIPv6(groups) : true;   // غير مفهوم → احجب
+  }
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  return _isPrivateIPv4(parts);
+}
+const _isPrivateIp = isPrivateIp;
+
 // كاش قصير لنتيجة فحص DNS الآمن لكل hostname — يتجنب lookup على كل طلب
-const _DNS_OK_TTL_MS = 60_000;
+// TTL قصير: كل ثانية إضافية تُطيل نافذة DNS-rebinding (لا نثبّت IP لأن fetch لا يدعم ذلك).
+const _DNS_OK_TTL_MS = 10_000;
 const _DNS_OK_MAX = 500;
 const _dnsOkCache = new Map(); // hostname -> expiresAt
 
@@ -37,9 +94,11 @@ async function _assertSafeUrl(rawUrl) {
   if (!["http:", "https:"].includes(parsed.protocol)) {
     throw new Error(`[SSRF] Disallowed protocol: ${parsed.protocol}`);
   }
-  // Block bare IP literals in the hostname
-  if (net.isIP(parsed.hostname) && _isPrivateIp(parsed.hostname)) {
-    throw new Error(`[SSRF] Direct private IP blocked: ${parsed.hostname}`);
+  // WHATWG URL يُبقي الأقواس في عناوين IPv6 ("[::1]") ويحوّل 2130706433 إلى 127.0.0.1
+  const bareHost = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (net.isIP(bareHost)) {
+    if (_isPrivateIp(bareHost)) throw new Error(`[SSRF] Direct private IP blocked: ${parsed.hostname}`);
+    return;   // عنوان عام صريح: لا حاجة لـ DNS
   }
   // DNS pre-resolution — block hostnames that resolve to private ranges
   const _host = parsed.hostname.toLowerCase();
@@ -47,7 +106,7 @@ async function _assertSafeUrl(rawUrl) {
   if (_cachedUntil && _cachedUntil > Date.now()) return;
   let records;
   try {
-    records = await dns.lookup(parsed.hostname, { all: true });
+    records = await dns.lookup(bareHost, { all: true });
   } catch (e) {
     throw new Error(`[SSRF] DNS resolution failed for ${parsed.hostname}: ${e.message}`);
   }
@@ -61,6 +120,7 @@ async function _assertSafeUrl(rawUrl) {
   _dnsOkCache.set(_host, Date.now() + _DNS_OK_TTL_MS);
 }
 // ────────────────────────────────────────────────────────────────
+const MAX_REDIRECTS = 5;
 const _keepAliveAgents = {
   http:  new HttpAgent({ keepAlive: true, maxSockets: 20 }),
   https: new HttpsAgent({ keepAlive: true, maxSockets: 20 }),
@@ -131,7 +191,6 @@ async function performRequest(config) {
   } = config;
   if (!url) throw new Error("fetchHttp: 'url' مطلوب");
   const finalUrl = buildUrl(url, params, baseURL);
-  await _assertSafeUrl(finalUrl);
   const finalHeaders = { ...defaults.headers, ...headers };
   let body;
   const upper = method.toUpperCase();
@@ -155,18 +214,43 @@ async function performRequest(config) {
   }
   const controller = timeout ? new AbortController() : null;
   const timer = timeout ? setTimeout(() => controller.abort(), timeout) : null;
-  const isHttps = finalUrl.startsWith("https");
+  // إعادة التوجيه تُتبَّع يدوياً: fetch الافتراضي كان يتبعها دون إعادة فحص الوجهة،
+  // فيكفي رابط عام يحوّل إلى http://169.254.169.254/ لتجاوز الحاجز.
+  let currentUrl = finalUrl;
+  let currentMethod = upper;
+  let currentBody = body;
+  let currentHeaders = finalHeaders;
   let res;
   try {
-    res = await fetch(finalUrl, {
-      method: upper,
-      headers: finalHeaders,
-      body,
-      signal: controller ? controller.signal : undefined,
-      agent: isHttps ? _keepAliveAgents.https : _keepAliveAgents.http,
-    });
+    for (let hop = 0; ; hop++) {
+      await _assertSafeUrl(currentUrl);
+      res = await fetch(currentUrl, {
+        method: currentMethod,
+        headers: currentHeaders,
+        body: currentBody,
+        redirect: "manual",
+        signal: controller ? controller.signal : undefined,
+        agent: currentUrl.startsWith("https") ? _keepAliveAgents.https : _keepAliveAgents.http,
+      });
+      const location = res.headers.get("location");
+      if (![301, 302, 303, 307, 308].includes(res.status) || !location) break;
+      if (hop >= MAX_REDIRECTS) throw new Error(`[SSRF] Too many redirects (>${MAX_REDIRECTS})`);
+      try { await res.body?.cancel(); } catch (_) {}
+      const next = new URL(location, currentUrl);
+      if (next.origin !== new URL(currentUrl).origin) {
+        // لا نمرّر بيانات اعتماد إلى أصل آخر
+        currentHeaders = Object.fromEntries(Object.entries(currentHeaders)
+          .filter(([k]) => !/^(authorization|cookie|proxy-authorization|x-api-key)$/i.test(k)));
+      }
+      if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod === "POST")) {
+        currentMethod = "GET";
+        currentBody = undefined;
+      }
+      currentUrl = next.href;
+    }
   } catch (e) {
     if (timer) clearTimeout(timer);
+    if (e?.message?.startsWith("[SSRF]")) throw e;
     throw wrapNetworkError(e, timeout);
   }
   if (timer) clearTimeout(timer);

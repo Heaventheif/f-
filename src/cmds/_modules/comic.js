@@ -1,9 +1,7 @@
 import http from '../../utils/fetchHttp.js';
-import fs from 'fs-extra';
-import os from 'os';
-import path from 'path';
 import { getHfBase, getInternalToken } from '../../utils/hfClient.js';
 import { downloadWithLimit } from '../../utils/concurrentDownload.js';
+import { downloadImageToTemp, removeFiles, sendImageBatches } from '../../utils/mangaDelivery.js';
 const BASE_URL = 'https://arcomixverse.blogspot.com';
 const BATCH_SIZE = 15;       
 const BATCH_DELAY_MS = 1500; 
@@ -138,25 +136,14 @@ async function fetchChapterImages(chapterUrl) {
   );
   return data.images || [];
 }
-async function downloadImage(url, index, refererUrl) {
-  const ext = path.extname(url).split('?')[0] || '.jpg';
-  const filePath = path.join(os.tmpdir(), `comic_${Date.now()}_${index}${ext}`);
-  const res = await http.get(url, {
-    responseType: 'arraybuffer',
-    timeout: 25000,
-    headers: { ...commonHeaders, Referer: refererUrl }
+const downloadImage = (url, index, refererUrl) =>
+  downloadImageToTemp(url, index, {
+    prefix: 'comic', timeout: 25000, requireImage: true,
+    headers: { ...commonHeaders, Referer: refererUrl },
   });
-  const contentType = res.headers['content-type'] || '';
-  if (!contentType.startsWith('image/')) {
-    throw new Error(`رد غير متوقع (${contentType}) بدل صورة من: ${url}`);
-  }
-  await fs.writeFile(filePath, res.data);
-  return filePath;
-}
 const DOWNLOAD_CONCURRENCY = 6;
 const downloadAllWithLimit = (urls, refererUrl, limit = DOWNLOAD_CONCURRENCY) =>
   downloadWithLimit(urls, (url, i) => downloadImage(url, i, refererUrl), limit);
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 export default {
   config: {
     name: "comic",
@@ -306,29 +293,13 @@ export default {
           threadID, null, messageID
         );
       }
-      let allSent = true;
-      for (let i = 0; i < validFiles.length; i += BATCH_SIZE) {
-        const batch = validFiles.slice(i, i + BATCH_SIZE);
-        const isFirst = i === 0;
-        try {
-          await new Promise((resolve, reject) => {
-            global.safeSend(
-              api,
-              { attachment: batch.map((f) => fs.createReadStream(f)) },
-              threadID,
-              (err) => (err ? reject(err) : resolve()),
-              isFirst ? messageID : null
-            );
-          });
-        } catch (e) {
-          allSent = false;
-          console.error('[comic] فشل إرسال دفعة صور:', e.message);
-        }
-        if (i + BATCH_SIZE < validFiles.length) {
-          await sleep(BATCH_DELAY_MS);
-        }
-      }
-      await Promise.allSettled(validFiles.map((f) => fs.remove(f)));
+      const allSent = await sendImageBatches({
+        files: validFiles, batchSize: BATCH_SIZE, threadID, replyToID: messageID,
+        send: (payload, tid, cb, mid) => global.safeSend(api, payload, tid, cb, mid),
+        delayMs: BATCH_DELAY_MS,
+        onError: (e) => console.error('[comic] فشل إرسال دفعة صور:', e.message),
+      });
+      await removeFiles(validFiles);
       if (!allSent || failedCount > 0) {
         await global.safeSend(
           api,

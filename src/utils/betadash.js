@@ -3,7 +3,7 @@ import http from "./fetchHttp.js";
 import { get as cacheGet, set as cacheSet } from "./cache.js";
 
 export const BETADASH_BASE = (process.env.BETADASH_API_BASE || "https://betadash-api-swordslush-production.up.railway.app").replace(/\/+$/, "");
-const USER_AGENT = "SunkenBot/4.0 BetadashClient";
+const USER_AGENT = "SunkenBot/5.0 BetadashClient";
 const MAX_ID = 20;
 const MAX_TEXT = 180;
 const MAX_BODY_BYTES = 12 * 1024 * 1024;

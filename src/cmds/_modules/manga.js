@@ -1,10 +1,8 @@
 "use strict";
 import http from "../../utils/fetchHttp.js";
-import fs from "fs-extra";
-import os from "os";
-import path from "path";
 import cache from "../../utils/cache.js";
 import { downloadWithLimit } from "../../utils/concurrentDownload.js";
+import { sleep, downloadImageToTemp, removeFiles, sendImageBatches } from "../../utils/mangaDelivery.js";
 const API_BASE       = "https://api.mangadex.org";
 export const MAX_PER_GROUP = 14;
 const SEARCH_TTL     = 30 * 60 * 1000;   
@@ -18,7 +16,6 @@ const LANG_ALIASES = {
 };
 const LANG_LABELS = { ar: "العربية", en: "الإنجليزية", ja: "اليابانية" };
 const HEADERS = { "User-Agent": "SunkenBot/2.0 (manga command)" };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function sendMangaMessage(api, body, threadID, callback, messageID, bypassHumanQueue = false) {
   if (bypassHumanQueue) {
@@ -218,15 +215,7 @@ async function buildPageUrls(chapterId) {
 }
 // Download a single manga page image to a temp file.
 async function downloadImage(url, index) {
-  const ext = path.extname(url).split("?")[0] || ".jpg";
-  const filePath = path.join(os.tmpdir(), `manga_${Date.now()}_${index}${ext}`);
-  const res = await http.get(url, {
-    responseType: "arraybuffer",
-    timeout: 20000,
-    headers: HEADERS,
-  });
-  await fs.writeFile(filePath, res.data);
-  return filePath;
+  return downloadImageToTemp(url, index, { prefix: "manga", timeout: 20000, headers: HEADERS });
 }
 const DOWNLOAD_CONCURRENCY = 6;
 // Download all page images with a concurrency limit.
@@ -397,12 +386,11 @@ async function pollJob3asq(jobId) {
   throw new Error("انتهت مهلة انتظار الكشط من المصدر البديل.");
 }
 async function downloadJobImage3asq(jobId, idx) {
-  const res = await http.get(`${BRIDGE_URL_3ASQ}/manga-bridge/jobs/${jobId}/image/${idx}`, {
-    responseType: "arraybuffer", headers: BRIDGE_HEADERS_3ASQ, timeout: 25000,
+  return downloadImageToTemp(`${BRIDGE_URL_3ASQ}/manga-bridge/jobs/${jobId}/image/${idx}`, idx, {
+    tmpName: `manga_3asq_${jobId}_${idx}.jpg`,
+    timeout: 25000,
+    headers: BRIDGE_HEADERS_3ASQ,
   });
-  const filePath = path.join(os.tmpdir(), `manga_3asq_${jobId}_${idx}.jpg`);
-  await fs.writeFile(filePath, res.data);
-  return filePath;
 }
 const downloadAllWithLimit3asq = (jobId, count, limit = 6) =>
   downloadWithLimit(Array.from({ length: count }, (_, i) => i), (i) => downloadJobImage3asq(jobId, i), limit);
@@ -417,19 +405,14 @@ async function tryFallback3asq({ api, threadID, messageID, rawName, chapterNumbe
     const downloaded = await downloadAllWithLimit3asq(jobId, result.image_count);
     const validFiles = downloaded.filter(Boolean);
     if (!validFiles.length) return false;
-    for (let i = 0; i < validFiles.length; i += MAX_PER_GROUP) {
-      const batch = validFiles.slice(i, i + MAX_PER_GROUP);
-      const isFirst = i === 0;
-      await new Promise((resolve, reject) => {
-        sendMangaMessage(
-          api,
-          { body: isFirst ? `📖 ${rawName} — الفصل ${chapterNumber} (مصدر بديل)` : "", attachment: batch.map(f => fs.createReadStream(f)) },
-          threadID, (err) => (err ? reject(err) : resolve()), isFirst ? messageID : null, bypassHumanQueue
-        );
-      });
-      if (!bypassHumanQueue && i + MAX_PER_GROUP < validFiles.length) await sleep(600);
-    }
-    await Promise.allSettled(validFiles.map(f => fs.remove(f)));
+    await sendImageBatches({
+      files: validFiles, batchSize: MAX_PER_GROUP, threadID, replyToID: messageID,
+      send: (payload, tid, cb, mid) => sendMangaMessage(api, payload, tid, cb, mid, bypassHumanQueue),
+      buildBody: ({ isFirst }) => (isFirst ? `📖 ${rawName} — الفصل ${chapterNumber} (مصدر بديل)` : ""),
+      delayMs: bypassHumanQueue ? 0 : 600,
+      stopOnError: true,
+    });
+    await removeFiles(validFiles);
     return true;
   } catch (e) {
     console.warn("[manga:3asq] فشل المصدر البديل:", e.message);
@@ -557,31 +540,16 @@ export default {
       if (!validFiles.length) {
         throw { userMsg: "❌ فشل تحميل صفحات الفصل. حاول مرة أخرى." };
       }
-      let allSent = true;
-      const totalGroups = Math.ceil(validFiles.length / MAX_PER_GROUP);
-      for (let i = 0; i < validFiles.length; i += MAX_PER_GROUP) {
-        const group = validFiles.slice(i, i + MAX_PER_GROUP);
-        const groupNum = Math.floor(i / MAX_PER_GROUP) + 1;
-        const isFirst = i === 0;
-        const body =
+      const allSent = await sendImageBatches({
+        files: validFiles, batchSize: MAX_PER_GROUP, threadID, replyToID: messageID,
+        send: (payload, tid, cb, mid) => send(payload, tid, cb, mid),
+        buildBody: ({ groupNum, totalGroups }) =>
           totalGroups > 1
             ? `📖 ${mangaTitle} — الفصل ${chapterNumber} (${groupNum}/${totalGroups})`
-            : `📖 ${mangaTitle} — الفصل ${chapterNumber}`;
-        try {
-          await new Promise((resolve, reject) => {
-            send(
-              { body, attachment: group.map((f) => fs.createReadStream(f)) },
-              threadID,
-              (err) => (err ? reject(err) : resolve()),
-              isFirst ? messageID : null
-            );
-          });
-        } catch (err) {
-          allSent = false;
-        }
-        if (!bypassHumanQueue && i + MAX_PER_GROUP < validFiles.length) await sleep(600);
-      }
-      await Promise.allSettled(validFiles.map((f) => fs.remove(f)));
+            : `📖 ${mangaTitle} — الفصل ${chapterNumber}`,
+        delayMs: bypassHumanQueue ? 0 : 600,
+      });
+      await removeFiles(validFiles);
       if (!allSent || validFiles.length !== pageUrls.length) {
         await send(
           "⚠️ تم إرسال جزء من الفصل فقط.\nيمكنك إعادة المحاولة.",

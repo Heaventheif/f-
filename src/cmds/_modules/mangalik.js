@@ -220,7 +220,7 @@ async function downloadImage(imageUrl, destination, source, referer) {
       redirect: "manual",
       headers: {
         Referer: referer,
-        "User-Agent": "Mozilla/5.0 (compatible; SunkenBot/4.0; +https://starzmanga.com/)",
+        "User-Agent": "Mozilla/5.0 (compatible; SunkenBot/5.0; +https://starzmanga.com/)",
       },
       signal: AbortSignal.timeout(25_000),
     });

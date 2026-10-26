@@ -203,9 +203,9 @@ export const handleMessage = async (rawApi, event) => {
   } catch (err) {
     timer.end("(فشل)");
     global.perfManager?.trackError();
-    console.error(`[command:${commandName}]`, err.message);
+    console.error(`[command:${commandName}]`, err?.stack || err?.message || err);
     try {
-      await api.sendMessage("⚠️ حدث خطأ أثناء تنفيذ الأمر — تم إبلاغ المطوّر تلقائياً.", threadID, null, replyTargetID);
+      await api.sendMessage("⚠️ حدث خطأ أثناء تنفيذ الأمر، حاول مرة أخرى لاحقاً.", threadID, null, replyTargetID);
     } catch (sendError) {
       console.error(`[command:${commandName}:send]`, sendError.message);
     }

@@ -29,7 +29,6 @@ export function startCleanupInterval() {
     cleanupOrphanTempFiles();
     try { cleaned += cache.sweep(); } catch (_) {}
     try { cleaned += global.cleanupIdleThreadGates(); } catch (_) {}
-    try { Bun.gc(true); } catch (_) {}
     const mem = process.memoryUsage();
     const pm  = global.perfManager?.getMetrics();
     console.log(
@@ -38,7 +37,7 @@ export function startCleanupInterval() {
       (pm ? ` | avg: ${pm.avgResponseTimeMs}ms | errors: ${pm.errorCount}` : "") +
       ` | Bots: ${global.botApis.length}`
     );
-  // HIGH-03 FIX: .unref() يمنع دورة cleanup (التي تشمل Bun.gc(true)) من
+  // HIGH-03 FIX: .unref() يمنع دورة cleanup من
   // إبقاء العملية حية بعد SIGTERM في حالة التخلص اللطيف من الموارد.
 }, 10 * 60 * 1000).unref();
 }

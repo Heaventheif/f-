@@ -30,20 +30,34 @@ export const STATE_FILE = process.env.FB_STATE_PATH ||
 const ALGO       = "aes-256-gcm";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
+const _sha256 = (text) => crypto.createHash("sha256").update(text, "utf8").digest("hex");
+
+/**
+ * بصمة APPSTATE كما وصلت من المنصة لحظة الإقلاع — تُحسب قبل أن نعدّل
+ * process.env.APPSTATE أثناء التشغيل (persistAppState يكتب فيه النسخة المدموجة).
+ * تُخزَّن مع الصف في قاعدة البيانات لنعرف عند الإقلاع التالي هل غيّر المستخدم القيمة.
+ */
+export const BOOT_ENV_HASH = (() => {
+  const raw = String(process.env.APPSTATE || "").trim();
+  return raw ? _sha256(raw) : null;
+})();
+
 // ── نسخة في الذاكرة ────────────────────────────────────────────────────────
 let _inMemoryState     = null;
 let _inMemoryHash      = null;
 let _lastSaveTimestamp = 0;
 
-// ── Mongo stubs ─────────────────────────────────────────────────────────────
-// Durable encrypted AppState storage in PostgreSQL (Neon-compatible).
+// ── PostgreSQL (متوافق مع Neon) ─────────────────────────────────────────────
+// تخزين مشفَّر ودائم لـ AppState. (كانت الدوال تُسمّى *Mongo* بالخطأ من نسخة قديمة.)
 let _dbSaveChain = Promise.resolve();
-export async function saveAppStateToMongo(state = _inMemoryState) {
+export async function saveAppStateToDatabase(state = _inMemoryState) {
   if (!_validateAppState(state)) return false;
   const db = await ensurePostgresSchema();
   if (!db) return false;
-  const payload = _encryptJson(_normalizeAppState(state));
-  if (!payload) return false;
+  const encrypted = _encryptJson(_normalizeAppState(state));
+  if (!encrypted) return false;
+  // envHash: بصمة APPSTATE القادمة من البيئة عند هذا الإقلاع (null إن لم توجد).
+  const payload = { ...encrypted, envHash: BOOT_ENV_HASH };
   await db.query(
     `INSERT INTO sunkenbot_appstate (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
      ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
@@ -51,22 +65,54 @@ export async function saveAppStateToMongo(state = _inMemoryState) {
   );
   return true;
 }
-export async function loadAppStateFromMongo() {
+
+/** يُرجع { state, envHash } — envHash === undefined يعني صفاً قديماً كُتب قبل هذا التعديل. */
+export async function loadAppStateRecordFromDatabase() {
   const db = await ensurePostgresSchema();
   if (!db) return null;
   const result = await db.query("SELECT payload FROM sunkenbot_appstate WHERE id = 1");
   const payload = result.rows?.[0]?.payload;
-  return _decryptJson(payload);
+  if (!payload) return null;
+  return { state: _decryptJson(payload), envHash: payload.envHash };
 }
 
-export async function readPersistedAppStateFromDatabase() {
+export async function readPersistedAppStateRecordFromDatabase() {
   try {
-    const state = await loadAppStateFromMongo();
-    return _validateAppState(state) ? _normalizeAppState(state) : null;
+    const rec = await loadAppStateRecordFromDatabase();
+    if (!rec || !_validateAppState(rec.state)) return null;
+    return { state: _normalizeAppState(rec.state), envHash: rec.envHash };
   } catch (error) {
     console.warn(`[APPSTATE] تعذر الاستعادة من PostgreSQL (${error?.code || error?.message || "unknown"})`);
     return null;
   }
+}
+
+export async function readPersistedAppStateFromDatabase() {
+  return (await readPersistedAppStateRecordFromDatabase())?.state ?? null;
+}
+
+/**
+ * يقرر أي AppState يُستخدم عند الإقلاع.
+ *
+ * المشكلة السابقة: كانت نسخة قاعدة البيانات تتغلب دائماً على APPSTATE، فلو وضع
+ * المستخدم APPSTATE جديداً بعد انتهاء القديم لا يُطبَّق أبداً.
+ * الحل: نقارن بصمة APPSTATE الحالية بالبصمة المخزَّنة آخر مرة:
+ *   • اختلفت  → المستخدم وضع قيمة جديدة → قيمة البيئة تتغلب (والقاعدة تملأ الكوكيز الناقصة).
+ *   • تطابقت  → البيئة هي نفس اللقطة القديمة → القاعدة تتغلب (تحافظ على التجديدات).
+ *   • APPSTATE_FORCE_ENV=true → البيئة تتغلب دائماً (مخرج طوارئ).
+ *   • صف قديم بلا بصمة (undefined) → نُبقي السلوك القديم مرة واحدة ثم نُدوّن البصمة.
+ */
+export function chooseStartupState({ envState, dbState, dbEnvHash, bootEnvHash = BOOT_ENV_HASH, forceEnv = false }) {
+  const hasEnv = _validateAppState(envState);
+  const hasDb  = _validateAppState(dbState);
+  if (!hasEnv && !hasDb) return null;
+  if (!hasDb)  return { state: envState, source: "APPSTATE", reason: "no-db-row" };
+  if (!hasEnv) return { state: dbState, source: "postgresql", reason: "no-env" };
+  const envIsNew = forceEnv || (dbEnvHash !== undefined && dbEnvHash !== bootEnvHash);
+  if (envIsNew) {
+    return { state: mergeAppStates(dbState, envState), source: "postgresql+new-env", reason: forceEnv ? "forced" : "env-changed" };
+  }
+  return { state: mergeAppStates(envState, dbState), source: "postgresql", reason: dbEnvHash === undefined ? "legacy-row" : "env-unchanged" };
 }
 
 export function readPersistedAppState() {
@@ -84,9 +130,16 @@ function _getKey() {
   return crypto.createHash("sha256").update(k, "utf8").digest();
 }
 
+let _warnedNoKey = false;
 function _encryptJson(obj) {
   const key = _getKey();
-  if (!key) return null;
+  if (!key) {
+    if (!_warnedNoKey) {
+      _warnedNoKey = true;
+      console.error("[APPSTATE] ❌ لا يوجد مفتاح تشفير (FCA_STATE_KEY / STATE_ENCRYPT_KEY / APPSTATE_SECRET بطول 32 حرفاً على الأقل) — لن تُحفظ الجلسة على القرص ولا في قاعدة البيانات.");
+    }
+    return null;
+  }
   const iv     = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);
   const data   = Buffer.concat([cipher.update(JSON.stringify(obj), "utf8"), cipher.final()]);
@@ -212,7 +265,7 @@ export function persistAppState(state, source = "auto") {
   // persistAppState is intentionally synchronous for existing FCA callbacks;
   // serialize async DB writes so older snapshots cannot overwrite newer ones.
   _dbSaveChain = _dbSaveChain.catch(() => {}).then(async () => {
-    const dbSaved = await saveAppStateToMongo(normalized);
+    const dbSaved = await saveAppStateToDatabase(normalized);
     if (dbSaved) console.log(`[APPSTATE] 💾 حُفظت نسخة مشفّرة في PostgreSQL (${source})`);
   }).catch((error) => {
     console.warn(`[APPSTATE] تعذر الحفظ في PostgreSQL (${error?.code || error?.message || "unknown"})`);

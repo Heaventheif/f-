@@ -22,7 +22,10 @@ import { dispatchMqttEvent }    from "../events/onMessage.js";
 import { startCleanupInterval } from "../events/onReady.js";
 import { createMqttConnectionManager } from "./MqttConnectionManager.js";
 import { initBotLifecycle }    from "./bot-init.js";
-import { persistAppState, mergeAppStates, readPersistedAppState, readPersistedAppStateFromDatabase } from "./appStatePersist.js";
+import {
+  persistAppState, readPersistedAppState, readPersistedAppStateRecordFromDatabase,
+  chooseStartupState, saveAppStateToDatabase, flushAppStatePersistence, BOOT_ENV_HASH,
+} from "./appStatePersist.js";
 import { startMonitoring } from "../core/monitor.js";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -51,23 +54,29 @@ export function getBotName(botIndex) { return loadBotNames()[String(botIndex)] |
 
 // ── AppState — قراءة (env → ذاكرة → ملف مشفَّر) ───────────────────────────
 export async function loadAppState() {
-  // PostgreSQL is the durable source on Render Free. Merge dashboard cookies
-  // underneath the persisted state so an older env snapshot cannot roll back refreshes.
-  let envState = readAppStateFromEnv();
-  try {
-    const fromDatabase = await readPersistedAppStateFromDatabase();
-    if (Array.isArray(fromDatabase) && fromDatabase.length) {
-      const state = mergeAppStates(envState || [], fromDatabase);
-      persistAppState(state, "startup-postgresql");
-      console.warn("[APPSTATE] استعادة الحالة من PostgreSQL");
-      return { state, index: 1, source: "postgresql" };
-    }
-  } catch (_) {}
+  const envState = readAppStateFromEnv();
+  const record   = await readPersistedAppStateRecordFromDatabase();
+  const forceEnv = /^(1|true|yes|on)$/i.test(String(process.env.APPSTATE_FORCE_ENV || "").trim());
 
-  // First boot: seed Neon from APPSTATE configured in Render.
-  if (envState) {
-    persistAppState(envState, "startup-env");
-    return { state: envState, index: 1, source: "APPSTATE" };
+  const choice = chooseStartupState({
+    envState,
+    dbState:   record?.state,
+    dbEnvHash: record ? record.envHash : undefined,
+    forceEnv,
+  });
+
+  if (choice) {
+    const label = { "no-db-row": "أول إقلاع: APPSTATE من البيئة", "no-env": "استعادة من PostgreSQL",
+      forced: "APPSTATE_FORCE_ENV: قيمة البيئة تتغلب", "env-changed": "اكتُشف APPSTATE جديد في البيئة — يتغلب على المخزَّن",
+      "env-unchanged": "استعادة من PostgreSQL (البيئة لم تتغير)", "legacy-row": "استعادة من PostgreSQL (صف قديم بلا بصمة)" }[choice.reason];
+    console.warn(`[APPSTATE] ${label}`);
+    persistAppState(choice.state, `startup-${choice.reason}`);
+    // دوّن بصمة البيئة الحالية في القاعدة إن لم تكن مطابقة (صف قديم أو قيمة جديدة)
+    if (record && record.envHash !== BOOT_ENV_HASH) {
+      try { await flushAppStatePersistence(); await saveAppStateToDatabase(choice.state); }
+      catch (e) { console.warn("[APPSTATE] تعذر تدوين بصمة البيئة:", e?.message || e); }
+    }
+    return { state: choice.state, index: 1, source: choice.source };
   }
 
   // Local encrypted file is only a fallback (ephemeral on Render Free).

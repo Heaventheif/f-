@@ -1,11 +1,12 @@
 import { Readable } from "node:stream";
 import { streamToTempFile } from "./mediaFile.js";
+import { assertSafeUrl } from "./fetchHttp.js";
 
 // These are the published homepages of the selected yy and tS repositories.
 // Environment variables may override them for preview or self-hosted deployments.
 const DEFAULT_API_URL = "https://yy-two-ruddy.vercel.app";
 const DEFAULT_TIKTOK_API = "https://heaventheif-ts.vercel.app";
-const USER_AGENT = "Mozilla/5.0 (compatible; SunkenBot/4.0)";
+const USER_AGENT = "Mozilla/5.0 (compatible; SunkenBot/5.0)";
 
 function cleanBase(value, fallback, variable) {
   const base = String(value || fallback).trim().replace(/\/+$/, "");
@@ -60,11 +61,28 @@ async function responseError(response) {
   );
 }
 
+// روابط التنزيل (download_url) تأتي من خدمة خارجية ولا نتحكم فيها، وقد تحوّل إلى
+// عناوين داخلية. أصل API_URL نفسه موثوق (قد يكون self-hosted على localhost عمداً)،
+// أما أي أصل آخر — بما فيه وجهات إعادة التوجيه — فيمرّ على حاجز SSRF.
+async function safeFetch(url, options = {}, maxRedirects = 5) {
+  const apiOrigin = new URL(getApiUrl()).origin;
+  let current = new URL(String(url));
+  for (let hop = 0; ; hop++) {
+    if (current.origin !== apiOrigin) await assertSafeUrl(current.href);
+    const response = await fetch(current, { ...options, redirect: "manual" });
+    const location = response.headers.get("location");
+    if (response.status < 300 || response.status >= 400 || !location) return response;
+    if (hop >= maxRedirects) throw new YYApiError("تجاوز الحد الأقصى لإعادة التوجيه.", { status: 502 });
+    await response.body?.cancel().catch(() => {});
+    current = new URL(location, current);
+  }
+}
+
 async function fetchWithRetry(url, options = {}) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await fetch(url, {
+      const response = await safeFetch(url, {
         ...options,
         headers: { "User-Agent": USER_AGENT, ...(options.headers || {}) },
         signal: options.signal || AbortSignal.timeout(180_000),

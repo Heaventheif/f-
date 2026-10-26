@@ -64,8 +64,14 @@ function streamFile(filePath, headers) {
 // ── Rate-limiter بسيط (per-IP, نافذة 60 ث) ─────────────────────────────
 function makeRateLimiter(windowMs, maxReqs) {
   const buckets = new Map();
+  const MAX_BUCKETS = 5000;
   return function isLimited(key) {
     const now    = Date.now();
+    // الخريطة كانت تكبر بلا حد (مفتاح لكل IP/قيمة X-Forwarded-For مزوّرة): نكنس المنتهي عند الامتلاء.
+    if (buckets.size >= MAX_BUCKETS) {
+      for (const [k, b] of buckets) if (now - b.start > windowMs) buckets.delete(k);
+      if (buckets.size >= MAX_BUCKETS) buckets.delete(buckets.keys().next().value);
+    }
     const bucket = buckets.get(key);
     if (!bucket || now - bucket.start > windowMs) {
       buckets.set(key, { start: now, count: 1 });

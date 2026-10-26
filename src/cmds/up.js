@@ -45,7 +45,7 @@ function formatUptime(sec) {
 function nowHHMMSS() {
     return new Date().toLocaleTimeString("en-GB", {
         hour: "2-digit", minute: "2-digit", second: "2-digit",
-        timeZone: process.env.TZ || "Africa/Algiers",
+        timeZone: process.env.TZ || "Europe/Berlin",
     });
 }
 function usageBar(pct) {

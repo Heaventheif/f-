@@ -24,7 +24,10 @@ async function fetchStream(url, redirectCount = 0) {
         res.resume(); 
         const location = headers.location;
         if (!location) return reject(new Error("إعادة توجيه بدون Location header"));
-        return fetchStream(location, redirectCount + 1).then(resolve).catch(reject);
+        // Location قد يكون نسبياً ("/path") — نحلّه على الرابط الحالي وإلا فشل assertSafeUrl.
+        let nextUrl;
+        try { nextUrl = new URL(location, url).href; } catch { return reject(new Error("Location غير صالح في إعادة التوجيه")); }
+        return fetchStream(nextUrl, redirectCount + 1).then(resolve).catch(reject);
       }
       if (statusCode !== 200) {
         res.resume();

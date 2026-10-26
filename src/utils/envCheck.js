@@ -4,8 +4,7 @@
  * Logs clear warnings for missing/misconfigured env vars grouped by severity.
  * Call once at startup before any service initialisation.
  *
- * AppState is dashboard-managed only (added via /dashboard's "AppState" tab,
- * provided through APPSTATE — login credentials are read from the environment.
+ * AppState is provided through the APPSTATE environment variable (cookie JSON array).
  */
 function buildChecks(projectRoot) {
   return [
@@ -15,8 +14,9 @@ function buildChecks(projectRoot) {
       label: "FB credentials",
       test: () => Boolean(process.env.APPSTATE?.trim()),
       message:
-        "لا يوجد أي حساب مضاف بعد — افتح لوحة التحكم (/dashboard) وأضف حساب فيسبوك من تبويب AppState " +
-        "(تسجيل الدخول يعتمد على AppState فقط، لا يوجد بديل بالبريد وكلمة المرور، ولا يُقرأ من متغيرات البيئة).",
+        "لا يوجد APPSTATE — أضفه كمتغير بيئة (مصفوفة JSON للكوكيز). " +
+        "تسجيل الدخول يعتمد على AppState فقط ولا يوجد بديل بالبريد وكلمة المرور. " +
+        "لتجاوز نسخة قديمة مخزَّنة في قاعدة البيانات اضبط APPSTATE_FORCE_ENV=true لإقلاع واحد.",
     },
     {
       level: "warn",

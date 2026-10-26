@@ -65,6 +65,16 @@ export async function ensurePostgresSchema() {
           PRIMARY KEY (collection_name, session_id)
         )
       `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS sunkenbot_bans (
+          kind TEXT NOT NULL CHECK (kind IN ('user', 'group')),
+          id TEXT NOT NULL,
+          banned BOOLEAN NOT NULL,
+          actor TEXT,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (kind, id)
+        )
+      `);
       return db;
     })().catch((error) => {
       schemaPromise = null;

@@ -1,4 +1,5 @@
 "use strict";
+import { persistBanChange } from "../utils/banStore.js";
 
 // ─── Message API ────────────────────────────────────────────────
 function buildMessageAPI(api, threadID, messageID) {
@@ -37,7 +38,7 @@ function getReplyTargetID(event) {
 // ─── Users Interface ────────────────────────────────────────────
 // واجهة موحَّدة لبيانات المستخدمين تعمل مع:
 //   • global.usersData  (Map في الذاكرة — دائماً موجودة)
-//   • BanModel / global._bannedUsers  (MongoDB — إن كان متصلاً)
+//   • global._bannedUsers  (يُحفظ دائماً عبر banStore: PostgreSQL أو ملف محلي)
 // تتوافق مع: Users.getData(uid) / Users.setData(uid, obj)
 function buildUsersInterface() {
   return {
@@ -46,7 +47,7 @@ function buildUsersInterface() {
      */
     getData: async (uid) => {
       const key = String(uid);
-      // global.getUserData يُعيد من الـ Map أولاً ثم MongoDB
+      // global.getUserData (إن عُرِّفت) تُعيد من الـ Map أولاً ثم من أي مصدر دائم
       if (typeof global.getUserData === "function") {
         try { return await global.getUserData(key); } catch (_) {}
       }
@@ -55,7 +56,7 @@ function buildUsersInterface() {
 
     /**
      * تحديث بيانات مستخدم — يدمج مع القيم الموجودة
-     * يدعم حقل banned بشكل خاص: يحدِّث global._bannedUsers + BanModel
+     * يدعم حقل banned بشكل خاص: يحدِّث global._bannedUsers ويحفظه عبر banStore
      */
     setData: async (uid, data) => {
       const key = String(uid);
@@ -72,6 +73,7 @@ function buildUsersInterface() {
         } else {
           global._bannedUsers?.delete(key);
         }
+        await persistBanChange("user", key, !!data.banned, data.bannedBy ?? data.unbannedBy);
       }
     },
   };
@@ -80,7 +82,7 @@ function buildUsersInterface() {
 // ─── Threads Interface ───────────────────────────────────────────
 // واجهة موحَّدة لبيانات المجموعات تعمل مع:
 //   • global.threadsData  (Map في الذاكرة — إن وُجدت)
-//   • BanModel / global._bannedGroups  (MongoDB — إن كان متصلاً)
+//   • global._bannedGroups  (يُحفظ دائماً عبر banStore: PostgreSQL أو ملف محلي)
 // تتوافق مع: Threads.getData(tid) / Threads.setData(tid, obj)
 function buildThreadsInterface() {
   return {
@@ -97,7 +99,7 @@ function buildThreadsInterface() {
 
     /**
      * تحديث بيانات مجموعة — يدمج مع القيم الموجودة
-     * يدعم حقل banned بشكل خاص: يحدِّث global._bannedGroups + BanModel
+     * يدعم حقل banned بشكل خاص: يحدِّث global._bannedGroups ويحفظه عبر banStore
      */
     setData: async (tid, data) => {
       const key = String(tid);
@@ -115,6 +117,7 @@ function buildThreadsInterface() {
         } else {
           global._bannedGroups?.delete(key);
         }
+        await persistBanChange("group", key, !!data.banned, data.bannedBy ?? data.unbannedBy);
       }
     },
   };

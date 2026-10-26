@@ -5,9 +5,10 @@ WORKDIR /app
 # Build tools for native Node/Bun dependencies
 RUN apk add --no-cache python3 make g++ gcc git
 
-COPY package.json ./
+# bun.lock مطلوب: يثبّت نسخ كل الحزم (بما فيها الاعتماديات غير المباشرة) لبناء قابل للتكرار.
+COPY package.json bun.lock ./
 
-RUN bun install --production
+RUN bun install --frozen-lockfile --production
 
 # ── Stage 2: Runtime image ───────────────────────────────────────
 FROM oven/bun:1-alpine AS runner

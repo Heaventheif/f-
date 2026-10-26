@@ -1,11 +1,12 @@
 services:
   - type: web
     name: xx-bot
-    runtime: node
+    # الكود يعتمد على Bun (Bun.serve / Bun.file) وهو غير متوفر في runtime: node،
+    # لذلك النشر عبر Docker (oven/bun) كما في Dockerfile.
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     region: frankfurt
     plan: free
-    buildCommand: bun install --production
-    startCommand: bun run start
     healthCheckPath: /health
 
     envVars:
@@ -48,6 +49,22 @@ services:
         value: "300"
       # Your Facebook appState JSON — set this manually in the Render dashboard
       - key: APPSTATE
+        sync: false
+      # اضبطه على true لإقلاع واحد فقط إذا وضعت APPSTATE جديداً ولم يُطبَّق
+      # (يتجاوز النسخة المخزَّنة في قاعدة البيانات). أعده إلى false بعد ذلك.
+      - key: APPSTATE_FORCE_ENV
+        value: "false"
+
+      # ── مفاتيح خدمات خارجية (اختيارية — الأمر المرتبط يتعطل بدونها) ──
+      - key: HF_SPACE_URL
+        sync: false
+      - key: TIKTOK_API_KEY
+        sync: false
+      - key: BETADASH_API_KEY
+        sync: false
+      - key: TUMBLR_API_KEY
+        sync: false
+      - key: FERDEV_API_KEY
         sync: false
       # مهلة بدء المزوّد البديل بالتوازي (مللي ثانية)
       - key: YT_HEDGE_MS

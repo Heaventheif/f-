@@ -4,6 +4,8 @@ process.env.TZ = 'Europe/Berlin';
 // ── BUG-01 FIX: علَم يمنع fcanew-r3nz75 من تسجيل معالجات أخطاء مكررة ──────────────
 global.__mainErrorHandlersInstalled = true;
 
+// يجب أن يكون أول استيراد: وحدات مثل appStatePersist تقرأ process.env لحظة التحميل.
+import "dotenv/config";
 import path from "path";
 import { checkEnv } from "./src/utils/envCheck.js";
 
@@ -81,8 +83,7 @@ import {
   loginBot,
 } from "./src/fca/Client.js";
 import { cleanupOrphanTempFiles } from "./src/utils/tempCleanup.js";
-
-try { await import("dotenv/config"); } catch (_) {}
+import { loadBans } from "./src/utils/banStore.js";
 
 checkEnv(PROJECT_ROOT);
 
@@ -117,6 +118,9 @@ const startBot = async () => {
   cleanupOrphanTempFiles();
 
   await loadCommands(COMMANDS_DIR);
+
+  // استعادة الحظر المحفوظ (PostgreSQL أو ملف محلي) فوق قوائم config.json
+  await loadBans();
 
   // ── حساب بوت واحد فقط ────────────────────────────────────────────────────
   const account = await loadAppState();
