@@ -38,6 +38,17 @@ services:
       # Internal token for /yt/* routes — auto-generated
       - key: INTERNAL_TOKEN
         generateValue: true
+      # Secure access token for the Broadcast dashboard (/broadcast)
+      - key: BROADCAST_TOKEN
+        generateValue: true
+      - key: BROADCAST_DATA_DIR
+        value: /app/data/broadcast
+      - key: BROADCAST_MAX_FILE_MB
+        value: "50"
+      - key: BROADCAST_MAX_TOTAL_MB
+        value: "100"
+      - key: BROADCAST_MAX_TARGETS
+        value: "300"
       # Your Facebook appState JSON — set this manually in the Render dashboard
       - key: APPSTATE
         sync: false

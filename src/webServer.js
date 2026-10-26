@@ -17,6 +17,11 @@ import { timingSafeEqual } from "node:crypto";
 import fs                  from "fs-extra";
 import vreden from "@vreden/youtube_scraper";
 import { downloadYoutubeAudio, downloadYoutubeVideo } from "./utils/yyApi.js";
+import {
+  initializeBroadcast, listBroadcastGroups, createBroadcastCampaign,
+  listBroadcastCampaigns, getBroadcastCampaign, controlBroadcastCampaign,
+  broadcastLimits,
+} from "./broadcastService.js";
 
 // ── مقارنة توكن آمنة زمنياً (يُغلق timing-attack على /yt/*) ────────────────
 function safeTokenEqual(a, b) {
@@ -108,10 +113,27 @@ function startWebServer() {
     return null; // OK — استمر
   }
 
+  const BROADCAST_TOKEN = (process.env.BROADCAST_TOKEN || "").trim();
+  const broadcastRateLimited = makeRateLimiter(60_000, 60);
+
+  function broadcastGuard(req) {
+    if (!BROADCAST_TOKEN || BROADCAST_TOKEN.length < 32)
+      return json({ error: "خدمة Broadcast غير مفعلة: اضبط BROADCAST_TOKEN بطول 32 حرفاً على الأقل" }, 503);
+    const provided = req.headers.get("X-Broadcast-Token") || "";
+    if (!safeTokenEqual(provided, BROADCAST_TOKEN)) return json({ error: "رمز الدخول غير صحيح" }, 401);
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+             || req.headers.get("cf-connecting-ip") || "unknown";
+    if (broadcastRateLimited(ip)) return json({ error: "طلبات كثيرة؛ حاول بعد قليل" }, 429);
+    return null;
+  }
+
+  const broadcastHtml = fs.readFileSync(new URL("./broadcast.html", import.meta.url), "utf8");
+
   // ── router رئيسي ──────────────────────────────────────────────────────────
   const server = Bun.serve({
     port: PORT,
-    idleTimeout: 60,     // ثواني — Bun.serve يدعمها مباشرة
+    idleTimeout: 60,
+    maxRequestBodySize: 110 * 1024 * 1024,     // ثواني — Bun.serve يدعمها مباشرة
 
     async fetch(req) {
       const { pathname } = new URL(req.url);
@@ -127,6 +149,7 @@ function startWebServer() {
   <p>⏱️ Uptime: ${Math.floor(process.uptime())} ثانية</p>
   <p>📦 الأوامر: ${global.commands?.size ?? 0}</p>
   <p>🔗 البوت: ${global.botApi ? "متصل" : "جاري الاتصال..."}</p>
+  <p><a href="/broadcast" style="color:#58a6ff">📣 فتح لوحة Broadcast</a></p>
 </body></html>`;
         return new Response(html, {
           headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -137,6 +160,59 @@ function startWebServer() {
       // NOTE: يُعيد {"status":"ok"} فقط — لا uptime ولا معلومات داخلية
       if (method === "GET" && (pathname === "/health" || pathname === "/api/health")) {
         return json({ status: "ok" });
+      }
+
+      // ── Broadcast dashboard and API ───────────────────────────────────────
+      if (method === "GET" && (pathname === "/broadcast" || pathname === "/broadcast/")) {
+        return new Response(broadcastHtml, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+      }
+
+      if (pathname.startsWith("/api/broadcast")) {
+        const deny = broadcastGuard(req);
+        if (deny) return deny;
+        try {
+          if (method === "GET" && pathname === "/api/broadcast/limits") {
+            await initializeBroadcast();
+            return json(broadcastLimits());
+          }
+          if (method === "GET" && pathname === "/api/broadcast/groups") {
+            const groups = await listBroadcastGroups();
+            return json({ groups });
+          }
+          if (method === "GET" && pathname === "/api/broadcast/campaigns") {
+            const campaigns = await listBroadcastCampaigns();
+            return json({ campaigns });
+          }
+          if (method === "POST" && pathname === "/api/broadcast") {
+            const form = await req.formData();
+            const text = String(form.get("text") || "");
+            let targetIds;
+            try { targetIds = JSON.parse(String(form.get("targetIds") || "[]")); }
+            catch { return json({ error: "قائمة المجموعات غير صالحة" }, 400); }
+            if (!Array.isArray(targetIds)) return json({ error: "قائمة المجموعات غير صالحة" }, 400);
+            const files = form.getAll("files").filter(v => v && typeof v.arrayBuffer === "function" && typeof v.name === "string" && v.name);
+            const campaign = await createBroadcastCampaign({ text, targetIds, files });
+            return json({ campaign }, 201);
+          }
+          const campaignMatch = pathname.match(/^\/api\/broadcast\/campaigns\/([0-9a-f-]{36})$/i);
+          if (method === "GET" && campaignMatch) {
+            const campaign = await getBroadcastCampaign(campaignMatch[1]);
+            return campaign ? json({ campaign }) : json({ error: "الحملة غير موجودة" }, 404);
+          }
+          const actionMatch = pathname.match(/^\/api\/broadcast\/campaigns\/([0-9a-f-]{36})\/(pause|resume|cancel|retry)$/i);
+          if (method === "POST" && actionMatch) {
+            const campaign = await controlBroadcastCampaign(actionMatch[1], actionMatch[2]);
+            return json({ campaign });
+          }
+          return json({ error: "المسار غير موجود" }, 404);
+        } catch (e) {
+          console.error("[BROADCAST]", e?.stack || e?.message || e);
+          const message = String(e?.message || "حدث خطأ داخلي");
+          const status = /غير موجودة/.test(message) ? 404
+            : /لا يمكن|ليست متوقفة|لا توجد وجهات|إجراء غير معروف|اختر|أدخل|الحد الأقصى|غير متاحة|غير صالح|فارغ/.test(message) ? 400
+            : /البوت غير متصل/.test(message) ? 503 : 500;
+          return json({ error: message.slice(0, 500) }, status);
+        }
       }
 
       // ── POST /yt/search ───────────────────────────────────────────────────

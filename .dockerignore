@@ -6,3 +6,9 @@ note-schedules.json
 *.log
 .git
 .gitignore
+
+data
+temp
+Fca_Database
+botNames.json
+cmd-overrides.json

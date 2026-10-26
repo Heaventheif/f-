@@ -49,6 +49,31 @@ function splitMessage(text) {
   return parts;
 }
 
+// ── callRawSend ──────────────────────────────────────────────────
+// مكتبة fcanew-r3nz75 تستدعي الـ callback ولا تحلّ الـ Promise المُرجَعة عند
+// تمرير callback. لذلك نجعل اكتمال الـ callback هو ما يُنهي الإرسال داخل البوابة،
+// بدل انتظار مهلة SEND_TIMEOUT_MS كاملة (كانت تُجمّد الخيط 60 ثانية وتسجّل خطأ كاذباً).
+// الأخطاء المرفوضة من الـ Promise تُمرَّر كما هي، والمهلة تبقى شبكة أمان.
+function callRawSend(rawApi, body, threadID, callback, messageID) {
+  if (typeof callback !== "function") {
+    return messageID !== undefined
+      ? rawApi.sendMessage(body, threadID, undefined, messageID)
+      : rawApi.sendMessage(body, threadID);
+  }
+  return new Promise((resolve, reject) => {
+    const cb = (err, info) => {
+      try { callback(err, info); } catch (_) {}
+      err ? reject(err) : resolve(info);
+    };
+    try {
+      const ret = messageID !== undefined
+        ? rawApi.sendMessage(body, threadID, cb, messageID)
+        : rawApi.sendMessage(body, threadID, cb);
+      if (ret && typeof ret.then === "function") ret.then(resolve, reject);
+    } catch (e) { reject(e); }
+  });
+}
+
 function gatedSend(api, body, threadID, callback, messageID) {
   // Auto-split messages that exceed Facebook's character limit.
   // Only applies to plain-text bodies; objects with attachments pass through.
@@ -86,13 +111,11 @@ function _gatedSendRaw(api, body, threadID, callback, messageID) {
     gate.lastSendAt = Date.now();
     let result;
     try {
-      result = await sendWithTimeout(() => messageID !== undefined
-        ? rawApi.sendMessage(body, threadID, callback, messageID)
-        : rawApi.sendMessage(body, threadID, callback));
+      result = await sendWithTimeout(() => callRawSend(rawApi, body, threadID, callback, messageID));
     } catch (sendErr) {
       // On HTTP 429 / 405 back the gate off by 30–60 s so subsequent
       // messages in this thread don't pile on and worsen the rate-limit.
-      const errMsg = String(sendErr?.message ?? sendErr ?? "");
+      const errMsg = String(sendErr?.message ?? sendErr?.error ?? sendErr ?? "");
       if (/429|405|rate.?limit|too many/i.test(errMsg)) {
         const backoffMs = 30_000 + Math.floor(Math.random() * 30_000);
         gate.lastSendAt = Date.now() + backoffMs;
@@ -102,7 +125,7 @@ function _gatedSendRaw(api, body, threadID, callback, messageID) {
     }
     return result;
   });
-  gate.promise = resultPromise.catch(e => { console.error("[SEND] خطأ:", e.message); });
+  gate.promise = resultPromise.catch(e => { console.error("[SEND] خطأ:", e?.message ?? e?.error ?? e); });
   return resultPromise;
 }
 function prioritySend(api, body, threadID, callback, messageID) {
@@ -115,9 +138,7 @@ function prioritySend(api, body, threadID, callback, messageID) {
     const wait = (PRIORITY_SEND_GAP_MS + _jitter) - (Date.now() - gate.lastSendAt);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
     gate.lastSendAt = Date.now();
-    const result = await sendWithTimeout(() => messageID !== undefined
-      ? rawApi.sendMessage(body, threadID, callback, messageID)
-      : rawApi.sendMessage(body, threadID, callback));
+    const result = await sendWithTimeout(() => callRawSend(rawApi, body, threadID, callback, messageID));
     return result;
   });
   // الطابور يكمل حتى لو فشلت عملية بالأولوية (لا يُجمّد السلسلة)
@@ -130,6 +151,9 @@ function prioritySend(api, body, threadID, callback, messageID) {
 //  - النتيجة تأتي من الـ callback فقط؛ الـ Promise المُرجَع من المكتبة نستعمله للأخطاء.
 //  - مهلة الإرسال تُحوَّل إلى callback(err) ولا تتحول إلى unhandledRejection.
 //  - MEDIA_GAP_MS (افتراضي 0) فاصل اختياري بين رفعتين في نفس المجموعة.
+const configuredMediaTimeout = Number.parseInt(process.env.FB_MEDIA_TIMEOUT_MS || "", 10);
+const MEDIA_TIMEOUT_MS = Number.isSafeInteger(configuredMediaTimeout) && configuredMediaTimeout > 0
+  ? Math.min(configuredMediaTimeout, 600_000) : Math.max(SEND_TIMEOUT_MS, 180_000);
 const MEDIA_GAP_MS = Math.max(0, Number.parseInt(process.env.MEDIA_GAP_MS || "", 10) || 0);
 
 function mediaSend(api, body, threadID, callback, messageID) {
@@ -148,7 +172,7 @@ function mediaSend(api, body, threadID, callback, messageID) {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      if (err && /429|405|rate.?limit|too many/i.test(String(err?.message ?? err))) {
+      if (err && /429|405|rate.?limit|too many/i.test(String(err?.message ?? err?.error ?? err))) {
         gate.lastSendAt = Date.now() + 30_000;
         console.warn("[MEDIA_SEND] ⚠️ rate-limited");
       }
@@ -156,10 +180,10 @@ function mediaSend(api, body, threadID, callback, messageID) {
       err ? reject(err) : resolve(info);
     };
     timer = setTimeout(() => {
-      const e = new Error(`Facebook sendMessage timed out after ${SEND_TIMEOUT_MS}ms`);
+      const e = new Error(`Facebook sendMessage timed out after ${MEDIA_TIMEOUT_MS}ms`);
       e.isTimeout = true;
       finish(e);
-    }, SEND_TIMEOUT_MS);
+    }, MEDIA_TIMEOUT_MS);
     const run = () => {
       if (done) return;
       try {
