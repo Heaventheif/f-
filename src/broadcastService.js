@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { ensurePostgresSchema } from "./utils/postgres.js";
 
 const DATA_DIR = path.resolve(process.env.BROADCAST_DATA_DIR || path.join(process.cwd(), "data", "broadcast"));
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
@@ -57,8 +58,17 @@ async function pacedSleep(ms, campaign) {
 
 async function persist() {
   const snapshot = JSON.stringify(store, null, 2);
-  // فشل كتابة واحد لا يجب أن يُسمّم كل الكتابات اللاحقة.
+  // Serialize writes so an older snapshot cannot overwrite a newer one.
   const run = writeChain.catch(() => {}).then(async () => {
+    const db = await ensurePostgresSchema();
+    if (db) {
+      await db.query(
+        `INSERT INTO sunkenbot_broadcast_store (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+        [snapshot],
+      );
+    }
+    // Local copy is only a fallback/diagnostic on ephemeral hosts, not durable storage.
     await fs.mkdir(DATA_DIR, { recursive: true });
     const tmp = `${STORE_FILE}.${process.pid}.tmp`;
     await fs.writeFile(tmp, snapshot, "utf8");
@@ -83,16 +93,46 @@ function summarize(campaign) {
 async function initStore() {
   if (initialized) return;
   await fs.mkdir(UPLOAD_DIR, { recursive: true });
+  let loadedFromPostgres = false;
   try {
-    const parsed = JSON.parse(await fs.readFile(STORE_FILE, "utf8"));
-    if (parsed && Array.isArray(parsed.campaigns)) store = parsed;
+    const db = await ensurePostgresSchema();
+    if (db) {
+      const result = await db.query("SELECT payload FROM sunkenbot_broadcast_store WHERE id = 1");
+      const parsed = result.rows?.[0]?.payload;
+      if (parsed && Array.isArray(parsed.campaigns)) {
+        store = parsed;
+        loadedFromPostgres = true;
+      }
+    }
   } catch (e) {
-    if (e.code !== "ENOENT") console.warn("[BROADCAST] تعذر قراءة السجل، سيبدأ سجل جديد:", safeError(e));
+    console.error("[BROADCAST] تعذر تحميل سجل الحملات من PostgreSQL:", safeError(e));
+    // Do not silently start an empty campaign store if DATABASE_URL is configured.
+    if (process.env.DATABASE_URL) throw e;
+  }
+  if (!loadedFromPostgres) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(STORE_FILE, "utf8"));
+      if (parsed && Array.isArray(parsed.campaigns)) store = parsed;
+    } catch (e) {
+      if (e.code !== "ENOENT") console.warn("[BROADCAST] تعذر قراءة السجل المحلي، سيبدأ سجل جديد:", safeError(e));
+    }
   }
   // A process may have died after an external send began. Never silently resend
   // those targets: their result is ambiguous until an operator reviews them.
   let changed = false;
   for (const c of store.campaigns) {
+    // On ephemeral Render Free storage, campaign metadata may survive in Neon
+    // while uploaded files do not. Never automatically send a campaign with missing attachments.
+    let missingAttachment = false;
+    for (const file of c.files || []) {
+      try { await fs.access(file.path); } catch { missingAttachment = true; }
+    }
+    if (missingAttachment && ["queued", "running"].includes(c.status)) {
+      c.status = "paused";
+      c.error = "توقفت الحملة لأن مرفقًا محليًا فُقد بعد إعادة تشغيل الاستضافة؛ أعد رفع الملفات وأنشئ حملة جديدة";
+      c.updatedAt = nowIso();
+      changed = true;
+    }
     for (const t of c.targets || []) {
       if (t.status === "processing") {
         t.status = "unknown";

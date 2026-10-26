@@ -4,6 +4,7 @@
 import { Readable } from "stream";
 import http from "../../utils/fetchHttp.js";
 import { getHfBaseOrNull } from "../../utils/hfClient.js";
+import { ensurePostgresSchema } from "../../utils/postgres.js";
 
 const ENGINE_TIMEOUT_MS = 55_000;
 const USERINFO_TIMEOUT_MS = 2_500;
@@ -30,65 +31,63 @@ if (!globalThis.__chessSweepTimer) {
   globalThis.__chessSweepTimer.unref?.();
 }
 
-function getCol() {
-  if (!global.db) return null;
-  try { return global.db.db("chess_games"); } catch { return null; }
-}
-
-async function mongoId(id) {
-  try {
-    const { ObjectId } = (await import("mongoose")).Types;
-    return { _id: new ObjectId(id) };
-  } catch {
-    return { _id: id };
-  }
-}
-
 async function findActiveGame(threadID, playerId) {
-  // RAM أولاً (سريع ويعمل دائماً)، ثم Mongo
   for (const g of _games.values()) {
     if (g.threadID === threadID && g.status === "active" &&
         (g.player_white === playerId || g.player_black === playerId)) return g;
   }
-  const col = getCol();
-  if (col) {
-    try {
-      const doc = await col.findOne({
-        threadID, status: "active",
-        $or: [{ player_white: playerId }, { player_black: playerId }],
-      });
-      if (doc) { doc._id = String(doc._id); return doc; }
-    } catch (e) { console.warn("[CHESS DB]", e.message); }
-  }
-  return null;
+  try {
+    const db = await ensurePostgresSchema();
+    if (!db) return null;
+    const result = await db.query(
+      `SELECT id, payload FROM sunkenbot_chess_games
+       WHERE thread_id = $1 AND status = 'active' AND (player_white = $2 OR player_black = $2)
+       ORDER BY updated_at DESC LIMIT 1`,
+      [String(threadID), String(playerId)],
+    );
+    const row = result.rows?.[0];
+    if (!row) return null;
+    const doc = { ...row.payload, _id: row.id };
+    _games.set(String(row.id), doc);
+    return doc;
+  } catch (e) { console.warn("[CHESS DB]", e.message); return null; }
 }
 
 async function createGame(game) {
   game.status = "active";
   game.createdAt = new Date().toISOString();
-  const col = getCol();
-  if (col) {
-    try {
-      const res = await col.insertOne({ ...game });
-      game._id = String(res.insertedId);
-    } catch (e) { console.warn("[CHESS DB]", e.message); }
-  }
   game._id ??= `${game.threadID}_${Date.now()}`;
-  _games.set(game._id, { ...game });
+  try {
+    const db = await ensurePostgresSchema();
+    if (db) await db.query(
+      `INSERT INTO sunkenbot_chess_games (id, payload, thread_id, status, player_white, player_black, updated_at)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6, NOW())
+       ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, thread_id=EXCLUDED.thread_id,
+       status=EXCLUDED.status, player_white=EXCLUDED.player_white, player_black=EXCLUDED.player_black, updated_at=NOW()`,
+      [String(game._id), JSON.stringify(game), String(game.threadID), game.status, String(game.player_white ?? ""), String(game.player_black ?? "")],
+    );
+  } catch (e) { console.warn("[CHESS DB] save failed:", e.message); }
+  _games.set(String(game._id), { ...game });
   return game;
 }
 
 async function updateGame(id, patch) {
   id = String(id);
   const g = _games.get(id);
-  if (g) {
-    Object.assign(g, patch); // نعدّل الكائن نفسه ليراه من يحمل مرجعاً له
-  }
-  const col = getCol();
-  if (col) {
-    try { await col.updateOne(await mongoId(id), { $set: patch }); }
-    catch (e) { console.warn("[CHESS DB]", e.message); }
-  }
+  if (g) Object.assign(g, patch);
+  try {
+    const db = await ensurePostgresSchema();
+    if (!db) return;
+    const result = await db.query("SELECT payload FROM sunkenbot_chess_games WHERE id = $1", [id]);
+    const current = { ...(result.rows?.[0]?.payload || g || { _id: id }), ...patch, _id: id };
+    await db.query(
+      `INSERT INTO sunkenbot_chess_games (id, payload, thread_id, status, player_white, player_black, updated_at)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6, NOW())
+       ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, thread_id=EXCLUDED.thread_id,
+       status=EXCLUDED.status, player_white=EXCLUDED.player_white, player_black=EXCLUDED.player_black, updated_at=NOW()`,
+      [id, JSON.stringify(current), String(current.threadID || ""), String(current.status || "active"), String(current.player_white ?? ""), String(current.player_black ?? "")],
+    );
+  } catch (e) { console.warn("[CHESS DB] update failed:", e.message); }
 }
 
 async function endGame(game, winnerId = null) {

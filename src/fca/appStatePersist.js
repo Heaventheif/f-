@@ -14,6 +14,7 @@
 import crypto from "node:crypto";
 import fs     from "node:fs";
 import path   from "node:path";
+import { ensurePostgresSchema, getPostgresPool } from "../utils/postgres.js";
 
 // ── إعدادات ────────────────────────────────────────────────────────────────
 export const EXPIRY_WARNING_MS  = 14 * 24 * 60 * 60 * 1_000;
@@ -35,8 +36,38 @@ let _inMemoryHash      = null;
 let _lastSaveTimestamp = 0;
 
 // ── Mongo stubs ─────────────────────────────────────────────────────────────
-export async function saveAppStateToMongo() { return false; }
-export async function loadAppStateFromMongo() { return null; }
+// Durable encrypted AppState storage in PostgreSQL (Neon-compatible).
+let _dbSaveChain = Promise.resolve();
+export async function saveAppStateToMongo(state = _inMemoryState) {
+  if (!_validateAppState(state)) return false;
+  const db = await ensurePostgresSchema();
+  if (!db) return false;
+  const payload = _encryptJson(_normalizeAppState(state));
+  if (!payload) return false;
+  await db.query(
+    `INSERT INTO sunkenbot_appstate (id, payload, updated_at) VALUES (1, $1::jsonb, NOW())
+     ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+    [JSON.stringify(payload)],
+  );
+  return true;
+}
+export async function loadAppStateFromMongo() {
+  const db = await ensurePostgresSchema();
+  if (!db) return null;
+  const result = await db.query("SELECT payload FROM sunkenbot_appstate WHERE id = 1");
+  const payload = result.rows?.[0]?.payload;
+  return _decryptJson(payload);
+}
+
+export async function readPersistedAppStateFromDatabase() {
+  try {
+    const state = await loadAppStateFromMongo();
+    return _validateAppState(state) ? _normalizeAppState(state) : null;
+  } catch (error) {
+    console.warn(`[APPSTATE] تعذر الاستعادة من PostgreSQL (${error?.code || error?.message || "unknown"})`);
+    return null;
+  }
+}
 
 export function readPersistedAppState() {
   return _atomicRead(STATE_FILE);
@@ -178,11 +209,24 @@ export function persistAppState(state, source = "auto") {
 
   // حفظ مشفَّر على القرص (جديد v4.0)
   const saved = _atomicWrite(STATE_FILE, normalized);
+  // persistAppState is intentionally synchronous for existing FCA callbacks;
+  // serialize async DB writes so older snapshots cannot overwrite newer ones.
+  _dbSaveChain = _dbSaveChain.catch(() => {}).then(async () => {
+    const dbSaved = await saveAppStateToMongo(normalized);
+    if (dbSaved) console.log(`[APPSTATE] 💾 حُفظت نسخة مشفّرة في PostgreSQL (${source})`);
+  }).catch((error) => {
+    console.warn(`[APPSTATE] تعذر الحفظ في PostgreSQL (${error?.code || error?.message || "unknown"})`);
+  });
 
-  console.log(`[APPSTATE] 💾 حُفظ (${normalized.length} cookie | ${source}${saved ? " | 🔒disk" : ""})`);
+  console.log(`[APPSTATE] 💾 حُفظ (${normalized.length} cookie | ${source}${saved ? " | 🔒local" : ""})`);
 
   // Metrics are maintained by the bot process; persistence must not depend on fcanew-r3nz75 internals.
   return true;
+}
+
+/** Wait until all queued PostgreSQL AppState writes have completed. */
+export async function flushAppStatePersistence() {
+  await _dbSaveChain;
 }
 
 // ── extendCookieExpiry ──────────────────────────────────────────────────────

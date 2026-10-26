@@ -23,7 +23,8 @@
     "mongoose": "^9.7.4",
     "youtubei.js": "^18.2.0",
     "request": "npm:@cypress/request@4.0.1",
-    "@vreden/youtube_scraper": "^1.2.9"
+    "@vreden/youtube_scraper": "^1.2.9",
+    "pg": "^8.16.3"
   },
   "_hardened": "fcanew-r3nz75 merged v4.0 — secureStore+mergeOnSave+rateLimiter+fca-lifecycle+monitor"
 }

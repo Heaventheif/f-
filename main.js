@@ -119,7 +119,7 @@ const startBot = async () => {
   await loadCommands(COMMANDS_DIR);
 
   // ── حساب بوت واحد فقط ────────────────────────────────────────────────────
-  const account = loadAppState();
+  const account = await loadAppState();
 
   if (!account) {
     console.error("[LOGIN] ❌ لا يوجد APPSTATE — أضف APPSTATE في متغيرات البيئة.");

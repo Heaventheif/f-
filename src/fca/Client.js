@@ -22,7 +22,7 @@ import { dispatchMqttEvent }    from "../events/onMessage.js";
 import { startCleanupInterval } from "../events/onReady.js";
 import { createMqttConnectionManager } from "./MqttConnectionManager.js";
 import { initBotLifecycle }    from "./bot-init.js";
-import { persistAppState, mergeAppStates, readPersistedAppState } from "./appStatePersist.js";
+import { persistAppState, mergeAppStates, readPersistedAppState, readPersistedAppStateFromDatabase } from "./appStatePersist.js";
 import { startMonitoring } from "../core/monitor.js";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -50,16 +50,32 @@ function saveBotName(botIndex, name) {
 export function getBotName(botIndex) { return loadBotNames()[String(botIndex)] || null; }
 
 // ── AppState — قراءة (env → ذاكرة → ملف مشفَّر) ───────────────────────────
-export function loadAppState() {
-  // 1. من البيئة
-  let state = readAppStateFromEnv();
-  if (state) return { state, index: 1, source: "APPSTATE" };
+export async function loadAppState() {
+  // PostgreSQL is the durable source on Render Free. Merge dashboard cookies
+  // underneath the persisted state so an older env snapshot cannot roll back refreshes.
+  let envState = readAppStateFromEnv();
+  try {
+    const fromDatabase = await readPersistedAppStateFromDatabase();
+    if (Array.isArray(fromDatabase) && fromDatabase.length) {
+      const state = mergeAppStates(envState || [], fromDatabase);
+      persistAppState(state, "startup-postgresql");
+      console.warn("[APPSTATE] استعادة الحالة من PostgreSQL");
+      return { state, index: 1, source: "postgresql" };
+    }
+  } catch (_) {}
 
-  // 2. من ملف مشفَّر (جديد v4.0 — يبقى بعد تحطُّم العملية)
+  // First boot: seed Neon from APPSTATE configured in Render.
+  if (envState) {
+    persistAppState(envState, "startup-env");
+    return { state: envState, index: 1, source: "APPSTATE" };
+  }
+
+  // Local encrypted file is only a fallback (ephemeral on Render Free).
   try {
     const fromFile = readPersistedAppState();
     if (Array.isArray(fromFile) && fromFile.length) {
-      console.warn("[APPSTATE] ⚠️ استعادة من الملف المشفَّر (البيئة فارغة)");
+      console.warn("[APPSTATE] استعادة من الملف المشفّر المحلي (نسخة احتياطية مؤقتة)");
+      persistAppState(fromFile, "startup-local-fallback");
       return { state: fromFile, index: 1, source: "encrypted-file" };
     }
   } catch (_) {}
@@ -67,8 +83,8 @@ export function loadAppState() {
   return null;
 }
 
-export function loadAllAppStates() {
-  const account = loadAppState();
+export async function loadAllAppStates() {
+  const account = await loadAppState();
   return account ? [account] : [];
 }
 

@@ -13,7 +13,7 @@
  *   • جميع الـ keep-alive timers محتفِظة بـ .unref() (HIGH-02/03)
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomBytes } from "node:crypto";
 import fs                  from "fs-extra";
 import vreden from "@vreden/youtube_scraper";
 import { downloadYoutubeAudio, downloadYoutubeVideo } from "./utils/yyApi.js";
@@ -94,6 +94,40 @@ function startKeepAlive(url, intervalMs, label) {
 function startWebServer() {
   const PORT             = parseInt(process.env.PORT || "10000");
   const YT_TOKEN         = process.env.INTERNAL_TOKEN || "";
+  const DASHBOARD_PIN    = String(process.env.PIN || "").trim();
+  const DASHBOARD_SESSION_TTL = 8 * 60 * 60 * 1000;
+  const dashboardSessions = new Map();
+  const loginRateLimited = makeRateLimiter(15 * 60_000, 8);
+  const globalLoginRateLimited = makeRateLimiter(15 * 60_000, 40);
+
+  function safePinEqual(provided, expected) {
+    if (!/^\d{4}$/.test(provided) || !/^\d{4}$/.test(expected)) return false;
+    return timingSafeEqual(Buffer.from(provided, "utf8"), Buffer.from(expected, "utf8"));
+  }
+  function requestIp(req) {
+    return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+      || req.headers.get("cf-connecting-ip") || "unknown";
+  }
+  function getDashboardSession(req) {
+    const cookie = req.headers.get("cookie") || "";
+    const match = cookie.match(/(?:^|;\s*)sunkenbot_dashboard=([a-f0-9]{64})(?:;|$)/);
+    if (!match) return false;
+    const expiresAt = dashboardSessions.get(match[1]);
+    if (!expiresAt || expiresAt <= Date.now()) {
+      dashboardSessions.delete(match[1]);
+      return false;
+    }
+    dashboardSessions.set(match[1], Date.now() + DASHBOARD_SESSION_TTL);
+    return true;
+  }
+  function cookieOptions(req, clear = false) {
+    const secure = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() === "https"
+      || new URL(req.url).protocol === "https:";
+    return `sunkenbot_dashboard=${clear ? "" : "__SESSION__"}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : Math.floor(DASHBOARD_SESSION_TTL / 1000)}${secure ? "; Secure" : ""}`;
+  }
+  function dashboardAuthRequired() {
+    return !/^\d{4}$/.test(DASHBOARD_PIN);
+  }
   const YT_RATE_WINDOW   = 60_000;
   const YT_RATE_MAX      = parseInt(process.env.YT_RATE_LIMIT_MAX || "20");
   const ytRateLimited    = makeRateLimiter(YT_RATE_WINDOW, YT_RATE_MAX);
@@ -148,12 +182,54 @@ function startWebServer() {
         return json({ status: "ok" });
       }
 
-      // ── Broadcast dashboard and API ───────────────────────────────────────
+      // ── PIN-protected Broadcast dashboard ─────────────────────────────────
+      if (pathname === "/api/dashboard/session" && method === "GET") {
+        if (dashboardAuthRequired()) return json({ error: "يجب ضبط متغير PIN من 4 أرقام في إعدادات البيئة" }, 503);
+        return json({ authenticated: getDashboardSession(req) });
+      }
+
+      if (pathname === "/api/dashboard/login" && method === "POST") {
+        if (dashboardAuthRequired()) return json({ error: "لوحة التحكم غير مهيأة: اضبط PIN من 4 أرقام" }, 503);
+        const ip = requestIp(req);
+        if (loginRateLimited(ip) || globalLoginRateLimited("all"))
+          return json({ error: "محاولات كثيرة. انتظر 15 دقيقة ثم أعد المحاولة." }, 429);
+        const body = await req.json().catch(() => ({}));
+        const provided = String(body?.pin ?? "");
+        if (!safePinEqual(provided, DASHBOARD_PIN)) return json({ error: "رمز PIN غير صحيح" }, 401);
+        const now = Date.now();
+        for (const [id, expiresAt] of dashboardSessions) if (expiresAt <= now) dashboardSessions.delete(id);
+        const sessionId = randomBytes(32).toString("hex");
+        dashboardSessions.set(sessionId, now + DASHBOARD_SESSION_TTL);
+        const cookie = cookieOptions(req).replace("__SESSION__", sessionId);
+        return new Response(JSON.stringify({ authenticated: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "Set-Cookie": cookie },
+        });
+      }
+
+      if (pathname === "/api/dashboard/logout" && method === "POST") {
+        const cookie = req.headers.get("cookie") || "";
+        const match = cookie.match(/(?:^|;\s*)sunkenbot_dashboard=([a-f0-9]{64})(?:;|$)/);
+        if (match) dashboardSessions.delete(match[1]);
+        return new Response(JSON.stringify({ authenticated: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "Set-Cookie": cookieOptions(req, true).replace("__SESSION__", "") },
+        });
+      }
+
       if (method === "GET" && (pathname === "/broadcast" || pathname === "/broadcast/")) {
-        return new Response(broadcastHtml, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+        if (dashboardAuthRequired()) return new Response("Dashboard PIN is not configured. Set PIN to exactly four digits.", { status: 503 });
+        return new Response(broadcastHtml, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
       }
 
       if (pathname.startsWith("/api/broadcast")) {
+        if (dashboardAuthRequired()) return json({ error: "لوحة التحكم غير مهيأة: اضبط PIN من 4 أرقام" }, 503);
+        if (!getDashboardSession(req)) return json({ error: "يلزم إدخال PIN لفتح لوحة التحكم" }, 401);
+        // Same-origin check for mutations; cookie is HttpOnly and SameSite=Strict.
+        if (method !== "GET" && method !== "HEAD") {
+          const origin = req.headers.get("origin");
+          if (origin && new URL(origin).host !== new URL(req.url).host) return json({ error: "طلب غير مسموح" }, 403);
+        }
         try {
           if (method === "GET" && pathname === "/api/broadcast/limits") {
             await initializeBroadcast();

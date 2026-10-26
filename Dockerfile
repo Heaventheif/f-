@@ -2,10 +2,10 @@
 FROM oven/bun:1-alpine AS deps
 WORKDIR /app
 
-# Build tools needed for native modules (e.g. sqlite3)
+# Build tools for native Node/Bun dependencies
 RUN apk add --no-cache python3 make g++ gcc git
 
-COPY package.json bun.lock* ./
+COPY package.json ./
 
 RUN bun install --production
 
@@ -18,7 +18,8 @@ RUN apk add --no-cache ffmpeg
 
 ENV NODE_ENV=production
 ENV PORT=10000
-ENV STATE_DIR=/app/data
+ENV STATE_DIR=/tmp
+ENV TMPDIR=/tmp/sunkenbot-media
 
 # Non-privileged user — reduces attack surface
 RUN addgroup -S botgroup && adduser -S botuser -G botgroup
@@ -29,9 +30,9 @@ COPY --chown=botuser:botgroup --from=deps /app/node_modules ./node_modules
 # Copy application source
 COPY --chown=botuser:botgroup . .
 
-# Writable runtime directories — appstate, db, tmp media
-RUN mkdir -p /app/data /app/temp /app/Fca_Database \
-    && chown -R botuser:botgroup /app/data /app/temp /app/Fca_Database
+# Writable temporary runtime directories (Render Free has no persistent disk)
+RUN mkdir -p /tmp/broadcast /tmp/sunkenbot-media /app/temp /app/Fca_Database \
+    && chown -R botuser:botgroup /tmp/broadcast /tmp/sunkenbot-media /app/temp /app/Fca_Database
 
 USER botuser
 
