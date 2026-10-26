@@ -38,9 +38,6 @@ services:
       # Internal token for /yt/* routes — auto-generated
       - key: INTERNAL_TOKEN
         generateValue: true
-      # Secure access token for the Broadcast dashboard (/broadcast)
-      - key: BROADCAST_TOKEN
-        generateValue: true
       - key: BROADCAST_DATA_DIR
         value: /app/data/broadcast
       - key: BROADCAST_MAX_FILE_MB

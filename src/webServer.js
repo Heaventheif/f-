@@ -113,20 +113,6 @@ function startWebServer() {
     return null; // OK — استمر
   }
 
-  const BROADCAST_TOKEN = (process.env.BROADCAST_TOKEN || "").trim();
-  const broadcastRateLimited = makeRateLimiter(60_000, 60);
-
-  function broadcastGuard(req) {
-    if (!BROADCAST_TOKEN || BROADCAST_TOKEN.length < 32)
-      return json({ error: "خدمة Broadcast غير مفعلة: اضبط BROADCAST_TOKEN بطول 32 حرفاً على الأقل" }, 503);
-    const provided = req.headers.get("X-Broadcast-Token") || "";
-    if (!safeTokenEqual(provided, BROADCAST_TOKEN)) return json({ error: "رمز الدخول غير صحيح" }, 401);
-    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-             || req.headers.get("cf-connecting-ip") || "unknown";
-    if (broadcastRateLimited(ip)) return json({ error: "طلبات كثيرة؛ حاول بعد قليل" }, 429);
-    return null;
-  }
-
   const broadcastHtml = fs.readFileSync(new URL("./broadcast.html", import.meta.url), "utf8");
 
   // ── router رئيسي ──────────────────────────────────────────────────────────
@@ -168,8 +154,6 @@ function startWebServer() {
       }
 
       if (pathname.startsWith("/api/broadcast")) {
-        const deny = broadcastGuard(req);
-        if (deny) return deny;
         try {
           if (method === "GET" && pathname === "/api/broadcast/limits") {
             await initializeBroadcast();
