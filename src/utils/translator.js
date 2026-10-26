@@ -1,92 +1,201 @@
 "use strict";
 import * as cache from "./cache.js";
-import TranslationClient from "@toil/translate";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import path from "node:path";
 
-const CACHE_TTL_MS = 60 * 60 * 1000;
-const MAX_TEXT_LEN = 45_000; // أقل من حد MSEdge (50k حرف/طلب) بهامش أمان
-const TIMEOUT_SHORT_MS = 15_000;
-const TIMEOUT_LONG_MS = 40_000; // للنصوص الكبيرة (chunks الرواية)
-const LONG_TEXT_LEN = 5_000;
-const DETECT_SAMPLE_LEN = 500;
+// Google web endpoint is unofficial: keep requests sequential, cache each chunk,
+// and back off when the endpoint starts throttling or returns transient errors.
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_TEXT_LEN = 45_000;
+const CHUNK_LEN = 3500;
+const REQUEST_TIMEOUT_MS = 20_000;
+const MIN_REQUEST_GAP_MS = 900;
+const MAX_RETRIES = 4;
+const DISK_CACHE_FILE = path.resolve(process.cwd(), "data", "translator-cache.json");
 
-// ملاحظة: المكتبة لا تُصدّر enum الخدمات وقت التشغيل (types فقط)، فنمرّر القيمة النصية.
-// لاستبدال الخدمة: "yandexbrowser" (حد 10k) أو "yandextranslate" (حد 10k).
-// fetchOpts.timeout ضروري: الافتراضي في المكتبة 3 ثوانٍ فقط وقد يُسقط الطلبات الكبيرة.
-const client = new TranslationClient({
-  service: "msedge",
-  fetchOpts: { timeout: TIMEOUT_LONG_MS },
-});
-
-// رموز اللغات في tr.js ← رموز Microsoft Translator
 const LANG_ALIASES = {
-  zh: "zh-Hans", "zh-cn": "zh-Hans", "zh-tw": "zh-Hant",
+  zh: "zh-CN", "zh-cn": "zh-CN", "zh-tw": "zh-TW",
   tl: "fil", no: "nb", iw: "he",
 };
+
+const diskCache = new Map();
+let diskCacheLoaded = false;
+let diskCacheLoadPromise = null;
+let saveQueue = Promise.resolve();
+let requestQueue = Promise.resolve();
+let lastRequestAt = 0;
 
 function normalizeLang(code) {
   const c = String(code || "").trim();
   return LANG_ALIASES[c.toLowerCase()] || c;
 }
 
-function withTimeout(promise, ms, label) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label}: انتهت المهلة بعد ${ms}ms`)), ms);
+function cacheKey(lang, text) {
+  const digest = createHash("sha256").update(text).digest("hex");
+  return `${normalizeLang(lang)}:${digest}`;
+}
+
+async function loadDiskCache() {
+  if (diskCacheLoaded) return;
+  if (diskCacheLoadPromise) return diskCacheLoadPromise;
+  diskCacheLoadPromise = (async () => {
+    try {
+      const parsed = JSON.parse(await readFile(DISK_CACHE_FILE, "utf8"));
+      const now = Date.now();
+      for (const [key, entry] of Object.entries(parsed)) {
+        if (entry && typeof entry.value === "string" && entry.expiresAt > now) {
+          diskCache.set(key, entry);
+        }
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        console.warn("[TRANSLATOR] Could not load disk cache:", String(error?.message || error).slice(0, 120));
+      }
+    } finally {
+      diskCacheLoaded = true;
+      diskCacheLoadPromise = null;
+    }
+  })();
+  return diskCacheLoadPromise;
+}
+
+function persistDiskCache() {
+  // Serialize writes so each successful chunk is a durable checkpoint.
+  saveQueue = saveQueue.then(async () => {
+    await mkdir(path.dirname(DISK_CACHE_FILE), { recursive: true });
+    const payload = Object.fromEntries(diskCache);
+    const tempFile = `${DISK_CACHE_FILE}.tmp`;
+    await writeFile(tempFile, JSON.stringify(payload), "utf8");
+    await rename(tempFile, DISK_CACHE_FILE);
+  }).catch(error => {
+    console.warn("[TRANSLATOR] Could not save disk cache:", String(error?.message || error).slice(0, 120));
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return saveQueue;
 }
 
-function isMostlyArabic(text) {
-  const letters = text.match(/\p{L}/gu);
-  if (!letters) return false;
-  const arabic = text.match(/[\u0600-\u06FF]/g);
-  return !!arabic && arabic.length > letters.length * 0.3;
+function getCached(lang, text) {
+  const key = cacheKey(lang, text);
+  const entry = diskCache.get(key);
+  if (entry && entry.expiresAt > Date.now()) return entry.value;
+  if (entry) diskCache.delete(key);
+  const memoryValue = cache.get(`tr_${normalizeLang(lang)}:${text}`);
+  return typeof memoryValue === "string" ? memoryValue : null;
 }
 
-/**
- * المكتبة تفترض لغة المصدر "en" إن مرّرنا رمز الهدف فقط ("ar" = en→ar)،
- * فنحدد المصدر صراحةً: العربية بالفحص المحلي، وغير ذلك عبر client.detect على عيّنة صغيرة.
- */
-async function resolveSourceLang(text) {
-  if (isMostlyArabic(text)) return "ar";
-  try {
-    const sample = text.slice(0, DETECT_SAMPLE_LEN);
-    const res = await withTimeout(client.detect(sample), TIMEOUT_SHORT_MS, "detect");
-    if (res?.lang) return String(res.lang);
-  } catch (_) {}
-  return "en";
+async function setCached(lang, text, value) {
+  const key = cacheKey(lang, text);
+  diskCache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+  cache.set(`tr_${normalizeLang(lang)}:${text}`, value, CACHE_TTL_MS);
+  await persistDiskCache();
 }
 
-async function callTranslate(text, targetLang) {
-  const to = normalizeLang(targetLang);
-  const from = await resolveSourceLang(text);
-  // النص بلغة الهدف أصلًا — لا حاجة لطلب ترجمة
-  if (from.toLowerCase() === to.toLowerCase()) return text;
-  // المكتبة تفصل الزوج بـ "-"، فرمز مصدر فيه شرطة (zh-Hans) يُفسد التحليل → نكتفي بالجزء الأول
-  const pair = `${from.split("-")[0]}-${to}`;
-  const timeout = text.length > LONG_TEXT_LEN ? TIMEOUT_LONG_MS : TIMEOUT_SHORT_MS;
-  const result = await withTimeout(client.translate(text, pair), timeout, "toil/translate");
-  // الرد: { lang, translations: string[] }
-  const out = result?.translations?.[0];
-  return typeof out === "string" && out.trim() ? out.trim() : null;
+function splitText(text, maxLen = CHUNK_LEN) {
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let cut = remaining.lastIndexOf("\n", maxLen);
+    if (cut < maxLen * 0.45) cut = remaining.lastIndexOf(" ", maxLen);
+    if (cut < maxLen * 0.45) cut = maxLen;
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function queuedRequest(url) {
+  const run = requestQueue.then(async () => {
+    const wait = MIN_REQUEST_GAP_MS - (Date.now() - lastRequestAt);
+    if (wait > 0) await sleep(wait);
+    lastRequestAt = Date.now();
+    return fetchWithRetry(url);
+  });
+  requestQueue = run.catch(() => {});
+  return run;
+}
+
+async function fetchWithRetry(url) {
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      if (response.status === 429 || response.status === 503 || response.status === 502) {
+        const error = new Error(`Translation HTTP ${response.status}`);
+        error.retryAfter = Number(response.headers.get("retry-after")) * 1000 || 0;
+        throw error;
+      }
+      if (!response.ok) throw new Error(`Translation HTTP ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      const retryable = error?.name === "AbortError" || error?.retryAfter || /fetch failed|network|HTTP 429|HTTP 502|HTTP 503/i.test(String(error?.message || error));
+      if (!retryable || attempt === MAX_RETRIES) break;
+      const exponentialDelay = Math.min(30_000, 1500 * (2 ** attempt));
+      await sleep(Math.max(exponentialDelay, error.retryAfter || 0) + Math.floor(Math.random() * 500));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error("Translation request failed");
+}
+
+async function translateChunk(text, targetLang) {
+  const url = new URL("https://translate.googleapis.com/translate_a/single");
+  url.searchParams.set("client", "gtx");
+  url.searchParams.set("sl", "auto");
+  url.searchParams.set("tl", normalizeLang(targetLang));
+  url.searchParams.set("dt", "t");
+  url.searchParams.set("q", text);
+
+  const data = await queuedRequest(url);
+  const translated = Array.isArray(data?.[0])
+    ? data[0].map(part => Array.isArray(part) && typeof part[0] === "string" ? part[0] : "").join("")
+    : "";
+  return translated.trim() || null;
 }
 
 async function translateText(text, targetLang, fallbackToOriginal = true) {
-  if (!text?.trim()) return text;
+  if (typeof text !== "string" || !text.trim()) return text;
   if (text.length > MAX_TEXT_LEN) return fallbackToOriginal ? text : null;
 
-  const key = `tr_${targetLang}:${text}`;
-  const cached = cache.get(key);
-  if (cached) return cached;
+  const normalizedTarget = normalizeLang(targetLang);
+  await loadDiskCache();
+  const fullCached = getCached(normalizedTarget, text);
+  if (fullCached) return fullCached;
 
   try {
-    const result = await callTranslate(text, targetLang);
-    if (result) {
-      cache.set(key, result, CACHE_TTL_MS);
+    const chunks = splitText(text);
+    const translatedChunks = [];
+    for (const chunk of chunks) {
+      // Chunk-level persistence lets a later run resume without repeating
+      // already translated parts if a long document failed partway through.
+      const chunkCached = getCached(normalizedTarget, chunk);
+      if (chunkCached) {
+        translatedChunks.push(chunkCached);
+        continue;
+      }
+      const translated = await translateChunk(chunk, normalizedTarget);
+      if (!translated) throw new Error("Empty translation response");
+      translatedChunks.push(translated);
+      await setCached(normalizedTarget, chunk, translated);
+    }
+    const result = translatedChunks.join("");
+    if (result.trim()) {
+      await setCached(normalizedTarget, text, result);
       return result;
     }
-  } catch (e) {
-    console.warn("[TRANSLATOR] toil/translate:", e.message?.substring(0, 100));
+  } catch (error) {
+    console.warn("[TRANSLATOR] Google endpoint:", String(error?.message || error).slice(0, 120));
   }
   return fallbackToOriginal ? text : null;
 }
@@ -97,18 +206,17 @@ async function translateTextStrict(text, targetLang) {
 
 async function translateToArabic(text) {
   if (!text?.trim()) return text;
-  if (/[\u0600-\u06FF]/.test(text) && text.match(/[\u0600-\u06FF]/g).length > text.length * 0.3) {
-    return text;
-  }
+  const letters = text.match(/\p{L}/gu) || [];
+  const arabic = text.match(/[\u0600-\u06FF]/g) || [];
+  if (letters.length && arabic.length > letters.length * 0.3) return text;
   return translateText(text, "ar");
 }
 
 async function translateToEnglish(text) {
   if (!text?.trim()) return text;
-  const nonAsciiLetters = text.match(/[^\x00-\x7F]/g);
-  if (!nonAsciiLetters || nonAsciiLetters.length < text.length * 0.15) {
-    return text;
-  }
+  const letters = text.match(/\p{L}/gu) || [];
+  const latin = text.match(/[A-Za-z]/g) || [];
+  if (letters.length && latin.length > letters.length * 0.8) return text;
   return translateText(text, "en");
 }
 

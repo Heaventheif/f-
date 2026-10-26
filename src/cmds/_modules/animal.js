@@ -1,5 +1,5 @@
 import http from "../../utils/fetchHttp.js";
-import { translateToArabic  } from "../../utils/translator.js";
+import { translateTextStrict } from "../../utils/translator.js";
 const CAT_TRIGGERS = ["قط", "قطة"];
 const DOG_TRIGGERS = ["كلب"];
 async function getCatFact() {
@@ -22,10 +22,16 @@ async function getDogFact() {
 async function sendFact(api, threadID, messageID, type) {
   try {
     const { emoji, label, fact } = type === "dog" ? await getDogFact() : await getCatFact();
-    const translated = await translateToArabic(fact);
-    global.safeSend(api, `${emoji} ${label}\n\n${translated}`, threadID, null, messageID);
-  } catch {
-    global.safeSend(api, "❌ فشل جلب الحقيقة — حاول مرة أخرى", threadID, null, messageID);
+    const translated = await translateTextStrict(fact, "ar");
+    if (!translated?.trim()) {
+      throw new Error("TRANSLATION_FAILED");
+    }
+    await global.safeSend(api, `${emoji} ${label}\n\n${translated.trim()}`, threadID, null, messageID);
+  } catch (error) {
+    const message = error?.message === "TRANSLATION_FAILED"
+      ? "⚠️ تم جلب الحقيقة، لكن تعذرت ترجمتها الآن. حاول مرة أخرى لاحقاً."
+      : "❌ تعذر جلب حقيقة الحيوان الآن — حاول مرة أخرى.";
+    await global.safeSend(api, message, threadID, null, messageID);
   }
 }
 export default {

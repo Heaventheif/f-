@@ -1,5 +1,3 @@
-import fs from "fs-extra";
-import { getHelpImage } from "../utils/helpImageCache.js";
 
 const MAX_PAGE_LENGTH = 1500;
 const EMOJI_RE = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji_Modifier}\uFE0E\uFE0F\u200D]|\p{Regional_Indicator}{2}/gu;
@@ -60,21 +58,8 @@ function orderedCategories(groups) {
 }
 
 function categoryBlocks(category, commands) {
-  const chunks = [];
-  let current = [];
-  for (const command of commands) {
-    const candidate = [...current, command.name].join(" | ");
-    if (current.length && candidate.length > 100) {
-      chunks.push(current);
-      current = [command.name];
-    } else {
-      current.push(command.name);
-    }
-  }
-  if (current.length) chunks.push(current);
-  return chunks.map((names, index) =>
-    `${index === 0 ? category : `${category} (تابع)`}\n  ${names.join(" | ")}`,
-  );
+  // Keep each command on its own short line for comfortable reading in Messenger.
+  return [`${category}\n${commands.map(({ name }) => `• ${name}`).join("\n")}`];
 }
 
 function paginateBlocks(header, blocks, footer = "") {
@@ -106,7 +91,7 @@ export function buildPages(entries) {
     commands.sort((a, b) => a.name.localeCompare(b.name, "ar"));
     blocks.push(...categoryBlocks(category, commands));
   }
-  return paginateBlocks(`الأوامر (${entries.length})`, blocks, "بحث: مساعدة <كلمة>");
+  return paginateBlocks(`📚 قائمة الأوامر\n━━━━━━━━━━━━\nعدد الأوامر: ${entries.length}`, blocks, "━━━━━━━━━━━━\nللبحث: مساعدة <اسم الأمر>");
 }
 
 function searchEntries(entries, query) {
@@ -153,8 +138,8 @@ export default {
         await send(api, `لا توجد نتائج لـ «${query}».`, event.threadID, event.messageID);
         return;
       }
-      const blocks = results.map((command) => `${command.name} — ${command.cat}`);
-      const pages = paginateBlocks(`نتائج «${query}» (${results.length})`, blocks);
+      const blocks = results.map((command) => `• ${command.name}\n  ${command.cat}${command.desc ? ` — ${command.desc}` : ""}`);
+      const pages = paginateBlocks(`🔎 نتائج البحث: «${query}»\nعدد النتائج: ${results.length}`, blocks, "للبحث عن أمر آخر: مساعدة <كلمة>");
       let replyToID = event.messageID || null;
       for (const page of pages) {
         const result = await send(api, page, event.threadID, replyToID);
@@ -163,22 +148,11 @@ export default {
       return;
     }
 
-    try {
-      const imagePath = await getHelpImage(entries);
-      const payload = { body: `📜 قائمة الأوامر (${entries.length})`, attachment: fs.createReadStream(imagePath) };
-      const safeSend = typeof global.safeSend === "function" ? global.safeSend : null;
-      if (safeSend) {
-        await safeSend(api, payload, event.threadID, null, event.messageID || null);
-      } else {
-        await api.sendMessage(payload, event.threadID, event.messageID || null);
-      }
-    } catch (error) {
-      console.error("[help:image] تعذر إنشاء/إرسال صورة المساعدة:", error?.message || error);
-      let replyToID = event.messageID || null;
-      for (const page of buildPages(entries)) {
-        const result = await send(api, page, event.threadID, replyToID);
-        replyToID = result?.messageID || null;
-      }
+    const pages = buildPages(entries);
+    let replyToID = event.messageID || null;
+    for (const page of pages) {
+      const result = await send(api, page, event.threadID, replyToID);
+      replyToID = result?.messageID || null;
     }
   },
 };
