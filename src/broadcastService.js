@@ -6,7 +6,12 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { ensurePostgresSchema } from "./utils/postgres.js";
 
-const DATA_DIR = path.resolve(process.env.BROADCAST_DATA_DIR || path.join(process.cwd(), "data", "broadcast"));
+// Render Free's application directory may be read-only. Prefer an explicit
+// BROADCAST_DATA_DIR, then a writable TMPDIR, and finally /tmp.
+const DATA_DIR = path.resolve(
+  process.env.BROADCAST_DATA_DIR ||
+  path.join(process.env.TMPDIR || "/tmp", "broadcast"),
+);
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const STORE_FILE = path.join(DATA_DIR, "campaigns.json");
 const MAX_FILE_BYTES = Math.max(1, Number.parseInt(process.env.BROADCAST_MAX_FILE_MB || "50", 10)) * 1024 * 1024;
@@ -68,11 +73,17 @@ async function persist() {
         [snapshot],
       );
     }
-    // Local copy is only a fallback/diagnostic on ephemeral hosts, not durable storage.
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    const tmp = `${STORE_FILE}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, snapshot, "utf8");
-    await fs.rename(tmp, STORE_FILE);
+    // Neon is the durable source when configured. A local mirror is best-effort
+    // in that case, so a read-only/ephemeral filesystem cannot break dashboard APIs.
+    try {
+      await fs.mkdir(DATA_DIR, { recursive: true });
+      const tmp = `${STORE_FILE}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, snapshot, "utf8");
+      await fs.rename(tmp, STORE_FILE);
+    } catch (e) {
+      if (!db) throw e;
+      console.warn("[BROADCAST] local mirror unavailable; PostgreSQL remains authoritative:", safeError(e));
+    }
   });
   writeChain = run;
   return run;
@@ -176,24 +187,45 @@ function botUnhealthyReason() {
   return null;
 }
 
+function normalizeThreadList(value) {
+  if (Array.isArray(value)) return value;
+  // Some FCA builds wrap thread results instead of returning the array directly.
+  if (Array.isArray(value?.threads)) return value.threads;
+  if (Array.isArray(value?.threadList)) return value.threadList;
+  if (Array.isArray(value?.data)) return value.data;
+  return [];
+}
+
 function callThreadList(api) {
   return new Promise((resolve, reject) => {
     if (typeof api.getThreadList !== "function") return reject(new Error("مكتبة البوت لا توفر getThreadList"));
     let settled = false;
     const timer = setTimeout(() => {
-      if (!settled) { settled = true; reject(new Error("انتهت مهلة جلب المجموعات")); }
-    }, 25_000);
-    const done = (err, data) => {
+      if (!settled) { settled = true; reject(new Error("انتهت مهلة جلب المجموعات من Facebook؛ تحقق من اتصال البوت")); }
+    }, 30_000);
+    const finish = (...args) => {
       if (settled) return;
+      let [err, data] = args;
+      // FCA forks differ: some callbacks use (err, data), others pass data only.
+      if (args.length === 1) {
+        if (err instanceof Error) data = undefined;
+        else { data = err; err = null; }
+      }
       settled = true;
       clearTimeout(timer);
-      err ? reject(err) : resolve(data);
+      if (err) return reject(err instanceof Error ? err : new Error(errorText(err)));
+      const list = normalizeThreadList(data);
+      if (!list.length && data && typeof data === "object" && !Array.isArray(data)) {
+        // An empty result is valid; preserve a concise diagnostic for unsupported shapes.
+        console.warn("[BROADCAST] getThreadList returned an unrecognized result shape", Object.keys(data).slice(0, 12));
+      }
+      resolve(list);
     };
     try {
-      const result = api.getThreadList(500, null, ["INBOX"], done);
-      if (result && typeof result.then === "function") result.then(data => done(null, data), done);
-      else if (Array.isArray(result)) done(null, result);
-    } catch (e) { done(e); }
+      const result = api.getThreadList(500, null, ["INBOX"], finish);
+      if (result && typeof result.then === "function") result.then(data => finish(null, data), err => finish(err));
+      else if (Array.isArray(result) || (result && (Array.isArray(result.threads) || Array.isArray(result.threadList) || Array.isArray(result.data)))) finish(null, result);
+    } catch (e) { finish(e); }
   });
 }
 
@@ -201,14 +233,34 @@ export async function listBroadcastGroups() {
   await initStore();
   const api = getApi();
   const threads = await callThreadList(api);
-  return (Array.isArray(threads) ? threads : [])
-    .filter(t => t && t.threadID && (t.isGroup === true || (Array.isArray(t.participantIDs) && t.participantIDs.length > 2)))
-    .map(t => ({
-      id: String(t.threadID),
-      name: String(t.name || t.threadName || `مجموعة ${t.threadID}`),
-      participantCount: Array.isArray(t.participantIDs) ? t.participantIDs.length : null,
-    }))
+  const groups = threads
+    .filter(t => {
+      if (!t || !(t.threadID ?? t.threadId ?? t.id)) return false;
+      const type = String(t.threadType ?? t.type ?? "").toUpperCase();
+      const explicitGroup = t.isGroup === true || t.isGroupThread === true ||
+        t.isGroup === 1 || type === "GROUP" || type === "GROUP_THREAD" || type === "MULTI";
+      const participantCount = Array.isArray(t.participantIDs) ? t.participantIDs.length
+        : Array.isArray(t.participants) ? t.participants.length
+        : Array.isArray(t.participantIds) ? t.participantIds.length : 0;
+      return explicitGroup || participantCount > 2;
+    })
+    .map(t => {
+      const id = String(t.threadID ?? t.threadId ?? t.id);
+      const participants = Array.isArray(t.participantIDs) ? t.participantIDs
+        : Array.isArray(t.participants) ? t.participants
+        : Array.isArray(t.participantIds) ? t.participantIds : null;
+      return {
+        id,
+        name: String(t.name || t.threadName || t.thread_name || `مجموعة ${id}`),
+        participantCount: participants ? participants.length : (t.participantCount ?? null),
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name, "ar"));
+  console.info(`[BROADCAST] group list loaded: ${groups.length} groups from ${threads.length} inbox threads`);
+  if (threads.length > 0 && groups.length === 0) {
+    console.warn("[BROADCAST] inbox threads were returned, but none matched known group markers");
+  }
+  return groups;
 }
 
 function safeFileName(name) {

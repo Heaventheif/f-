@@ -36,7 +36,8 @@ services:
       # Internal token for /yt/* routes — auto-generated
       - key: INTERNAL_TOKEN
         generateValue: true
-      # Broadcast uploads are temporary on the free instance. Do not treat local files as durable.
+      # Writable temporary path for Render Free; PostgreSQL stores campaign metadata.
+      # Uploaded files remain ephemeral and require external object storage for durability.
       - key: BROADCAST_DATA_DIR
         value: /tmp/broadcast
       - key: BROADCAST_MAX_FILE_MB
