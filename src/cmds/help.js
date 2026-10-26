@@ -1,3 +1,6 @@
+import fs from "fs-extra";
+import { getHelpImage } from "../utils/helpImageCache.js";
+
 const MAX_PAGE_LENGTH = 1500;
 const EMOJI_RE = /[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Emoji_Modifier}\uFE0E\uFE0F\u200D]|\p{Regional_Indicator}{2}/gu;
 const CATEGORY_ORDER = [
@@ -160,11 +163,22 @@ export default {
       return;
     }
 
-    const pages = buildPages(entries);
-    let replyToID = event.messageID || null;
-    for (const page of pages) {
-      const result = await send(api, page, event.threadID, replyToID);
-      replyToID = result?.messageID || null;
+    try {
+      const imagePath = await getHelpImage(entries);
+      const payload = { body: `📜 قائمة الأوامر (${entries.length})`, attachment: fs.createReadStream(imagePath) };
+      const safeSend = typeof global.safeSend === "function" ? global.safeSend : null;
+      if (safeSend) {
+        await safeSend(api, payload, event.threadID, null, event.messageID || null);
+      } else {
+        await api.sendMessage(payload, event.threadID, event.messageID || null);
+      }
+    } catch (error) {
+      console.error("[help:image] تعذر إنشاء/إرسال صورة المساعدة:", error?.message || error);
+      let replyToID = event.messageID || null;
+      for (const page of buildPages(entries)) {
+        const result = await send(api, page, event.threadID, replyToID);
+        replyToID = result?.messageID || null;
+      }
     }
   },
 };
