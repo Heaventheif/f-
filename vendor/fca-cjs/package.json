@@ -1,0 +1,1 @@
+{"name":"fca","version":"1.0.0","type":"commonjs","description":"fca experiment.","main":"index.js","dependencies":{"cheerio":"^1.2.0","deepdash":"^5.3.9","form-data":"^4.0.6","https-proxy-agent":"^7.0.6","lodash":"^4.18.1","mqtt":"^4.3.8","ws":"^8.21.3"},"overrides":{"tar":"^7.5.4"},"engines":{"bun":">=1.2.0"},"publishConfig":{"access":"public"}}

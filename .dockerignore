@@ -6,7 +6,6 @@ note-schedules.json
 *.log
 .git
 .gitignore
-
 data
 temp
 Fca_Database

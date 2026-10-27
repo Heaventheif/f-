@@ -1,0 +1,1 @@
+"use strict";module.exports=function(defaultFuncs,api,ctx){return function setTitle(newTitle,threadID,callback){if(!api.gcname||typeof api.gcname!=="function"){const err=new Error("setTitle requires the gcname module to be loaded.");if(callback)return callback(err);return Promise.reject(err)}return api.gcname(newTitle,threadID,callback)}};
