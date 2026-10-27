@@ -16,3 +16,6 @@ appstate*.enc
 # Build and editor artifacts
 .DS_Store
 *.tmp
+
+# Rust build output
+/rust/target/

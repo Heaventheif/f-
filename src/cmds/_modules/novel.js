@@ -3,6 +3,7 @@ import * as cheerio from "cheerio";
 import { translateToArabic } from "../../utils/translator.js";
 import { getHfBaseOrNull, getInternalToken } from "../../utils/hfClient.js";
 import cache from "../../utils/cache.js";
+import { isRustAvailable, callRust } from "../../utils/rustBridge.js";
 const CACHE_TTL = 3600 * 1000;
 const cacheGet = (k) => cache.get(k);
 const cacheSet = (k, v) => cache.set(k, v, CACHE_TTL);
@@ -101,13 +102,34 @@ const STOLEN_CONTENT_PATTERNS = [
   /unauthorized\s+(use|reproduction|copy)/i,
   /support\s+the\s+(author|translator)\s+by\s+reading/i,
 ];
+// Rust فقط للنصوص الطويلة (>2000 حرف): FFI overhead يهيمن على الفقرات القصيرة
 const isFiltered = (t) => {
+  if (typeof t === "string" && t.length > 2000 && isRustAvailable("is_filtered")) {
+    try {
+      return callRust("is_filtered", t);
+    } catch (err) {
+      console.warn(`[RUST] is_filtered → JS fallback: ${err.message}`);
+    }
+  }
+  return isFilteredJs(t);
+};
+const isFilteredJs = (t) => {
   const lower = t.toLowerCase();
   if (FILTER_WORDS.some(w => lower.includes(w))) return true;
   if (STOLEN_CONTENT_PATTERNS.some(re => re.test(t))) return true;
   return false;
 };
 function cleanText(t) {
+  if (typeof t === "string" && t.length > 2000 && isRustAvailable("clean_text")) {
+    try {
+      return callRust("clean_text", t);
+    } catch (err) {
+      console.warn(`[RUST] clean_text → JS fallback: ${err.message}`);
+    }
+  }
+  return cleanTextJs(t);
+}
+function cleanTextJs(t) {
   return t
     .replace(/\u00a0/g, " ")
     .replace(/[•◆▪]{2,}/g, " ")
@@ -333,6 +355,16 @@ async function fetchFromFallback(site, novelName, chapterNum) {
 }
 const SAFE_MESSAGE_LEN = 9000;
 function splitMessage(text, maxLen = SAFE_MESSAGE_LEN) {
+  if (typeof text === "string" && Number.isInteger(maxLen) && maxLen > 0 && maxLen <= 0xffffffff && isRustAvailable("split_message")) {
+    try {
+      return callRust("split_message", text, maxLen);
+    } catch (err) {
+      console.warn(`[RUST] split_message → JS fallback: ${err.message}`);
+    }
+  }
+  return splitMessageJs(text, maxLen);
+}
+function splitMessageJs(text, maxLen = SAFE_MESSAGE_LEN) {
   const chunks = [];
   let current = "";
   for (const para of text.split("\n\n")) {
@@ -552,3 +584,6 @@ export default {
     }
   }
 };
+
+// للاختبارات فقط (scripts/parity-test.js, scripts/bench-rust.js)
+export const __rustParity = { splitMessage, splitMessageJs, cleanText, cleanTextJs, isFiltered, isFilteredJs };

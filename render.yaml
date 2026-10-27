@@ -88,3 +88,6 @@ services:
       # TikTok search API hosted by the tS repository
       - key: TIKTOK_API
         value: https://heaventheif-ts.vercel.app
+      # دوال Rust معطّلة حتى يثبت bench-rust.js مكسبها. أزل من القائمة ما ثبت أنه رابح.
+      - key: DISABLE_RUST_FNS
+        value: "match_chapter,split_message,clean_text,is_filtered"

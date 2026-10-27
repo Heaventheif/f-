@@ -1,4 +1,5 @@
 import { load } from "cheerio";
+import { isRustAvailable, callRust } from "./rustBridge.js";
 
 export const STARZ_ORIGIN = "https://starzmanga.com";
 export const STARZ_ONE_PIECE_URL = `${STARZ_ORIGIN}/manga/one-piece/`;
@@ -117,7 +118,19 @@ function similarity(a, b) {
   return (2 * matches) / (aPairs.length + bPairs.length);
 }
 
+// ── Rust fast-path (fallback: النسخ *Js أدناه، منقولة حرفياً بلا تعديل) ──
 export function parseMangalikSearchResults(html) {
+  if (isRustAvailable("parse_mangalik_search_results")) {
+    try {
+      return callRust("parse_mangalik_search_results", String(html || ""));
+    } catch (err) {
+      console.warn(`[RUST] parse_mangalik_search_results → JS fallback: ${err.message}`);
+    }
+  }
+  return parseMangalikSearchResultsJs(html);
+}
+
+export function parseMangalikSearchResultsJs(html) {
   const $ = load(String(html || ""));
   const results = new Map();
   $("a[href*='/manga/']").each((_, element) => {
@@ -165,6 +178,18 @@ export function normalizeChapterNumber(value) {
 }
 
 export function findMangalikChapterRedirect(html, mangaUrl, chapter) {
+  // Rust فقط عندما يكون mangaUrl نصاً غير فارغ (غير ذلك له دلالات خاصة في new URL → نتركه لـ JS)
+  if (typeof mangaUrl === "string" && mangaUrl && isRustAvailable("find_mangalik_chapter_redirect")) {
+    try {
+      return callRust("find_mangalik_chapter_redirect", String(html || ""), mangaUrl, String(chapter || ""));
+    } catch (err) {
+      console.warn(`[RUST] find_mangalik_chapter_redirect → JS fallback: ${err.message}`);
+    }
+  }
+  return findMangalikChapterRedirectJs(html, mangaUrl, chapter);
+}
+
+export function findMangalikChapterRedirectJs(html, mangaUrl, chapter) {
   const target = normalizeChapterNumber(chapter);
   const $ = load(String(html || ""));
   let result = null;
@@ -182,6 +207,21 @@ export function findMangalikChapterRedirect(html, mangaUrl, chapter) {
 }
 
 export function extractReaderImages(html, chapterUrl, source) {
+  // chapterUrl: undefined (بلا base) أو نص غير فارغ. غير ذلك يُترك لـ JS للحفاظ على دلالات new URL.
+  // null → JS (new URL(v, null) يرمي TypeError). "" → JS أيضاً: new URL(v, "") يرمي، بينما Rust
+  // يفسّر base فارغاً على أنه "بلا base" فيقبل روابط مطلقة → اختلاف سلوك. لذلك "" مستبعد عمداً.
+  const baseOk = chapterUrl === undefined || (typeof chapterUrl === "string" && chapterUrl !== "");
+  if (baseOk && typeof source === "string" && isRustAvailable("extract_reader_images")) {
+    try {
+      return callRust("extract_reader_images", String(html || ""), chapterUrl ?? "", source);
+    } catch (err) {
+      console.warn(`[RUST] extract_reader_images → JS fallback: ${err.message}`);
+    }
+  }
+  return extractReaderImagesJs(html, chapterUrl, source);
+}
+
+export function extractReaderImagesJs(html, chapterUrl, source) {
   const $ = load(String(html || ""));
   const images = [];
   const seen = new Set();

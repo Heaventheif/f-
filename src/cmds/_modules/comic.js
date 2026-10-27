@@ -2,6 +2,7 @@ import http from '../../utils/fetchHttp.js';
 import { getHfBase, getInternalToken } from '../../utils/hfClient.js';
 import { downloadWithLimit } from '../../utils/concurrentDownload.js';
 import { downloadImageToTemp, removeFiles, sendImageBatches } from '../../utils/mangaDelivery.js';
+import { isRustAvailable, callRust } from '../../utils/rustBridge.js';
 const BASE_URL = 'https://arcomixverse.blogspot.com';
 const BATCH_SIZE = 15;       
 const BATCH_DELAY_MS = 1500; 
@@ -97,7 +98,29 @@ async function getChaptersForLabel(label) {
   }
   return all;
 }
+// Rust يستقبل العناوين فقط ويُرجع فهارس؛ نعيد ربطها بكائنات Blogger الأصلية هنا.
 function matchChapter(chapters, query) {
+  // FFI overhead يفوق المكسب للقوائم الصغيرة (<100 فصل)
+  if (
+    Array.isArray(chapters) &&
+    chapters.length >= 100 &&
+    isRustAvailable('match_chapter') &&
+    chapters.every(c => typeof c?.title?.['$t'] === 'string')
+  ) {
+    try {
+      const r = callRust('match_chapter', JSON.stringify(chapters.map(c => c.title['$t'])), String(query));
+      return {
+        match: r.matchIndex == null ? null : chapters[r.matchIndex],
+        ambiguous: r.ambiguous,
+        candidates: r.candidateIndices.map(i => chapters[i]),
+      };
+    } catch (err) {
+      console.warn(`[RUST] match_chapter → JS fallback: ${err.message}`);
+    }
+  }
+  return matchChapterJs(chapters, query);
+}
+function matchChapterJs(chapters, query) {
   const q = String(query).trim();
   if (!q) return { match: null, ambiguous: false, candidates: [] };
   const exact = chapters.find(c => c.title['$t'].trim() === q);
@@ -318,3 +341,6 @@ export default {
     }
   }
 };
+
+// للاختبارات فقط (scripts/parity-test.js, scripts/bench-rust.js)
+export const __rustParity = { matchChapter, matchChapterJs };
