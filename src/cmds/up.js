@@ -1,7 +1,6 @@
 import fs from "fs-extra";
 import path from "path";
 import { fileURLToPath } from "node:url";
-import { rustStatus } from "../utils/rustBridge.js";
 // CRITICAL-02 FIX: كان "..\\..\\..\\" يخرج من جذر المشروع — صحّحنا إلى "../.."
 // src/cmds/up.js  →  src/  →  project_root/cache
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -249,8 +248,6 @@ export default {
         L.push("📊 الأداء:");
         L.push(`  • Loop Lag: ${pingMs}ms   • زمن العملية: ${elapsed}ms`);
         L.push(`  • Uptime:   ${uptimeStr}`);
-        const rs = rustStatus();
-        L.push(rs.available ? "  • [RUST] ✅ loaded" : `  • [RUST] ⚠️ JS fallback (${rs.reason || "disabled"})`);
         message.reply(L.join("\n"));
     }
 };

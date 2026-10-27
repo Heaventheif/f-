@@ -10,11 +10,7 @@
   "scripts": {
     "build": "bun install --frozen-lockfile --production",
     "start": "bun --smol main.js",
-    "dev": "bun --watch main.js",
-    "build:rust": "cd rust && cargo build --locked --release",
-    "test:rust": "bun scripts/test-rust.js",
-    "parity:rust": "bun scripts/parity-test.js",
-    "bench:rust": "bun scripts/bench-rust.js"
+    "dev": "bun --watch main.js"
   },
   "overrides": {
     "cheerio": "^1.2.0"
