@@ -40,7 +40,7 @@ services:
       - key: APPSTATE_FORCE_ENV
         value: "false"
       - key: HF_SPACE_URL
-        sync: false
+        value: https://kiyunhai-g.hf.space
       - key: TIKTOK_API_KEY
         sync: false
       - key: BETADASH_API_KEY
