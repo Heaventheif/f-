@@ -1,4 +1,5 @@
-import fs from "../utils/fsCompat.js";
+import { readdir, stat } from "node:fs/promises";
+import { pathExists } from "../utils/fsCompat.js";
 import path from "path";
 import { fileURLToPath } from "node:url";
 import { collectSystemUsage, formatBytes } from "../utils/systemUsage.js";
@@ -50,19 +51,19 @@ async function dirStats(dirPath) {
   } catch {}
   return { count, size };
 }
-function countFiles(directory, recursive = false) {
+async function countFiles(directory, recursive = false) {
   let count = 0;
-  const walk = current => {
+  const walk = async current => {
     try {
-      for (const file of fs.readdirSync(current)) {
+      for (const file of await readdir(current)) {
         const fullPath = path.join(current, file);
-        const stat = fs.statSync(fullPath);
-        if (stat.isDirectory() && recursive) walk(fullPath);
-        else if (stat.isFile() && file.endsWith(".js")) count++;
+        const entryStat = await stat(fullPath);
+        if (entryStat.isDirectory() && recursive) await walk(fullPath);
+        else if (entryStat.isFile() && file.endsWith(".js")) count++;
       }
     } catch {}
   };
-  walk(directory);
+  await walk(directory);
   return count;
 }
 function formatPercent(value) {
@@ -137,7 +138,7 @@ export default {
       totalDeleted ? `  • حُذف ${totalDeleted} ملف، واستُعيد ${formatBytes(totalFreed)}` : "  • لا توجد ملفات كاش لحذفها",
       `  • المتبقي: ${remainingFiles} ملف (${formatBytes(remainingBytes)})`,
       "",
-      `📂 الأوامر: ${countFiles(MODULE_DIR)} ملف  •  المصدر: ${countFiles(path.join(MODULE_DIR, ".."), true)} ملف  •  الأحداث: ${global.eventCommands?.length || 0}`,
+      `📂 الأوامر: ${await countFiles(MODULE_DIR)} ملف  •  المصدر: ${await countFiles(path.join(MODULE_DIR, ".."), true)} ملف  •  الأحداث: ${global.eventCommands?.length || 0}`,
       `⏱️ زمن إعداد التقرير: ${Date.now() - started}ms`);
 
     await message.reply(lines.join("\n"));

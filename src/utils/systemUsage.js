@@ -1,9 +1,9 @@
 "use strict";
-import fs from "node:fs";
+import { readFile, readdir, statfs } from "node:fs/promises";
 import os from "node:os";
 
-function readText(file) {
-  try { return fs.readFileSync(file, "utf8").trim(); } catch { return null; }
+async function readText(file) {
+  try { return (await readFile(file, "utf8")).trim(); } catch { return null; }
 }
 function asNumber(value) {
   const n = Number(value);
@@ -56,34 +56,34 @@ export function formatBytes(value) {
   return `${amount.toFixed(1)} ${units[unit]}`;
 }
 
-export function readCgroupMemory() {
-  const v2Used = readText("/sys/fs/cgroup/memory.current");
-  if (v2Used !== null) return parseCgroupMemory(v2Used, readText("/sys/fs/cgroup/memory.max"));
-  const v1Used = readText("/sys/fs/cgroup/memory/memory.usage_in_bytes");
-  return v1Used === null ? null : parseCgroupMemory(v1Used, readText("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
+export async function readCgroupMemory() {
+  const v2Used = await readText("/sys/fs/cgroup/memory.current");
+  if (v2Used !== null) return parseCgroupMemory(v2Used, await readText("/sys/fs/cgroup/memory.max"));
+  const v1Used = await readText("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+  return v1Used === null ? null : parseCgroupMemory(v1Used, await readText("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
 }
 
-export function readCgroupCpu() {
-  const stat = readText("/sys/fs/cgroup/cpu.stat");
+export async function readCgroupCpu() {
+  const stat = await readText("/sys/fs/cgroup/cpu.stat");
   if (stat !== null) {
-    const parsed = parseCgroupCpu(stat, readText("/sys/fs/cgroup/cpu.max"));
+    const parsed = parseCgroupCpu(stat, await readText("/sys/fs/cgroup/cpu.max"));
     if (parsed) return parsed;
   }
   return parseCgroupCpuV1(
-    readText("/sys/fs/cgroup/cpu/cpuacct.usage"),
-    readText("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
-    readText("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+    await readText("/sys/fs/cgroup/cpu/cpuacct.usage"),
+    await readText("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+    await readText("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
   );
 }
 
-function readNetworkCounters() {
+async function readNetworkCounters() {
   try {
     let rx = 0n, tx = 0n;
-    const interfaces = fs.readdirSync("/sys/class/net").filter(name => name !== "lo");
+    const interfaces = (await readdir("/sys/class/net")).filter(name => name !== "lo");
     for (const name of interfaces) {
       const base = `/sys/class/net/${name}/statistics`;
-      const inBytes = readText(`${base}/rx_bytes`);
-      const outBytes = readText(`${base}/tx_bytes`);
+      const inBytes = await readText(`${base}/rx_bytes`);
+      const outBytes = await readText(`${base}/tx_bytes`);
       if (inBytes !== null) rx += BigInt(inBytes);
       if (outBytes !== null) tx += BigInt(outBytes);
     }
@@ -91,9 +91,9 @@ function readNetworkCounters() {
   } catch { return null; }
 }
 
-function readDiskUsage(target) {
+async function readDiskUsage(target) {
   try {
-    const stat = fs.statfsSync(target, { bigint: true });
+    const stat = await statfs(target, { bigint: true });
     const blockSize = BigInt(stat.bsize);
     const total = BigInt(stat.blocks) * blockSize;
     const free = BigInt(stat.bavail) * blockSize;
@@ -105,14 +105,14 @@ function readDiskUsage(target) {
 export async function collectSystemUsage(sampleMs = 250, diskPath = process.cwd()) {
   const duration = Math.max(50, Math.min(1000, Number(sampleMs) || 250));
   const processBefore = process.cpuUsage();
-  const containerBefore = readCgroupCpu();
-  const networkBefore = readNetworkCounters();
+  const containerBefore = await readCgroupCpu();
+  const networkBefore = await readNetworkCounters();
   const started = process.hrtime.bigint();
   await new Promise(resolve => setTimeout(resolve, duration));
   const elapsedUs = Math.max(1, Number(process.hrtime.bigint() - started) / 1000);
   const processDelta = process.cpuUsage(processBefore);
-  const containerAfter = readCgroupCpu();
-  const networkAfter = readNetworkCounters();
+  const containerAfter = await readCgroupCpu();
+  const networkAfter = await readNetworkCounters();
   const processCpuUs = processDelta.user + processDelta.system;
   const containerCpuUs = containerBefore && containerAfter
     ? Math.max(0, containerAfter.usageUs - containerBefore.usageUs)
@@ -129,10 +129,10 @@ export async function collectSystemUsage(sampleMs = 250, diskPath = process.cwd(
   return {
     sampleMs: elapsedUs / 1000,
     processMemory: { rss: memory.rss, heapUsed: memory.heapUsed, external: memory.external },
-    containerMemory: readCgroupMemory(),
+    containerMemory: await readCgroupMemory(),
     processCpuPercent: cpuPercent(processCpuUs, elapsedUs),
     containerCpuPercent: containerCpuUs === null ? null : cpuPercent(containerCpuUs, elapsedUs, containerCores),
-    disk: readDiskUsage(diskPath),
+    disk: await readDiskUsage(diskPath),
     network: networkAfter,
     networkDelta,
   };
