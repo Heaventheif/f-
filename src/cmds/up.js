@@ -1,1 +1,145 @@
-import fs from"../utils/fsCompat.js";import path from"path";import{fileURLToPath}from"node:url";const MODULE_DIR=path.dirname(fileURLToPath(import.meta.url));const CACHE_ROOT=path.join(MODULE_DIR,"..","..","cache");const AI_DIRS=["ai_sessions_gptx"];const MEDIA_DIRS=[];const GLOBAL_SESSIONS=[];function readFirstExisting(paths){for(const p of paths){try{const val=fs.readFileSync(p,"utf8").trim();if(val&&val!=="max")return Number(val);if(val==="max")return null}catch(_){}}return undefined}function getContainerMemory(){let usage=readFirstExisting(["/sys/fs/cgroup/memory.current"]);let limit=readFirstExisting(["/sys/fs/cgroup/memory.max"]);if(usage===undefined)usage=readFirstExisting(["/sys/fs/cgroup/memory/memory.usage_in_bytes"]);if(limit===undefined)limit=readFirstExisting(["/sys/fs/cgroup/memory/memory.limit_in_bytes"]);if(typeof limit==="number"&&limit>1e15)limit=null;if(typeof usage!=="number")return null;return{usage:usage,limit:typeof limit==="number"?limit:null}}function formatBytes(b){if(b<=0)return"0 B";if(b<1024)return`${b} B`;if(b<1048576)return`${(b/1024).toFixed(1)} KB`;return`${(b/1048576).toFixed(2)} MB`}function formatUptime(sec){const d=Math.floor(sec/86400);const h=Math.floor(sec%86400/3600);const m=Math.floor(sec%3600/60);const s=Math.floor(sec%60);const pad=n=>String(n).padStart(2,"0");const hhmmss=`${pad(h)}:${pad(m)}:${pad(s)}`;return d>0?`${d}ي ${hhmmss}`:hhmmss}function nowHHMMSS(){return(new Date).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit",timeZone:process.env.TZ||"Europe/Berlin"})}function usageBar(pct){const blocks=10;const filled=Math.max(0,Math.min(blocks,Math.round(pct/100*blocks)));return"▓".repeat(filled)+"░".repeat(blocks-filled)}async function clearDir(dirPath){let deleted=0,freed=0;try{if(!await fs.pathExists(dirPath))return{deleted:0,freed:0};const files=await fs.readdir(dirPath);for(const f of files){if(["Readme.me","empty.txt",".gitkeep"].includes(f))continue;const fp=path.join(dirPath,f);try{const st=await fs.stat(fp);if(st.isFile()){await fs.unlink(fp);deleted++;freed+=st.size}}catch(_){}}}catch(_){}return{deleted:deleted,freed:freed}}async function dirStats(dirPath){let count=0,size=0;try{if(!await fs.pathExists(dirPath))return{count:0,size:0};const files=await fs.readdir(dirPath);for(const f of files){if(["Readme.me","empty.txt",".gitkeep"].includes(f))continue;try{const st=await fs.stat(path.join(dirPath,f));if(st.isFile()){count++;size+=st.size}}catch(_){}}}catch(_){}return{count:count,size:size}}function clearGlobalSessions(){let total=0;for(const key of GLOBAL_SESSIONS){if(global[key]&&typeof global[key]==="object"){total+=Object.keys(global[key]).length;global[key]={}}}return total}function listCommandFiles(){const out=[];const collect=dir=>{if(!fs.existsSync(dir))return;for(const f of fs.readdirSync(dir)){const fp=path.join(dir,f);if(f.endsWith(".js")&&fs.statSync(fp).isFile())out.push(fp)}};try{collect(MODULE_DIR);collect(path.join(MODULE_DIR,"_modules"))}catch(_){}return out}function listSourceFiles(){const srcRoot=path.join(MODULE_DIR,"..");const out=[];const walk=dir=>{for(const f of fs.readdirSync(dir)){const fp=path.join(dir,f);if(fs.statSync(fp).isDirectory())walk(fp);else if(f.endsWith(".js"))out.push(fp)}};try{walk(srcRoot)}catch(_){}return out}function countCommandFiles(){try{return listCommandFiles().length}catch(_){return 0}}function countSourceFiles(){try{return listSourceFiles().length}catch(_){return 0}}async function doReload(){if(typeof global.reloadCommands==="function"){const errors=await global.reloadCommands()||[];return{ok:errors.length===0,fileErrors:errors}}return{ok:false,err:"reloadCommands not available",fileErrors:[]}}export default{config:{name:"up",aliases:["تحديث"],version:"3.0.0",author:"SunkenBot Developer",countDown:10,role:2,category:"إدارة وإشراف",description:"إعادة تحميل الأوامر (Hot Reload) + تنظيف الكاش + إحصاءات النظام",usage:["{pn}تحديث — تنفيذ إعادة التحميل والتنظيف وعرض التقرير"],hidden:true},onStart:async function({message:message}){const t0=Date.now();const{ok:reloadOk,err:reloadErr,fileErrors:fileErrors}=await doReload();const fileCount=countCommandFiles();const sourceCount=countSourceFiles();const eventsCount=global.eventCommands?.length||0;let totalDeleted=0,totalFreed=0;const cleanLines=[];for(const dir of[...AI_DIRS,...MEDIA_DIRS]){const{deleted:deleted,freed:freed}=await clearDir(path.join(CACHE_ROOT,dir));if(deleted>0){const label=AI_DIRS.includes(dir)?"🤖":"🎬";cleanLines.push(`  ${label} ${dir}: ${deleted} ملف (${formatBytes(freed)})`);totalDeleted+=deleted;totalFreed+=freed}}const clearedSessions=clearGlobalSessions();let remFiles=0,remSize=0;for(const dir of[...AI_DIRS,...MEDIA_DIRS]){const{count:count,size:size}=await dirStats(path.join(CACHE_ROOT,dir));remFiles+=count;remSize+=size}if(typeof Bun!=="undefined"&&typeof Bun.gc==="function"){try{Bun.gc(true)}catch(_){}}else if(typeof global.gc==="function"){try{global.gc()}catch(_){}}const mem=process.memoryUsage();const rss=(mem.rss/1048576).toFixed(1);const heap=(mem.heapUsed/1048576).toFixed(1);const ext=(mem.external/1048576).toFixed(1);const pingMs=await new Promise(resolve=>{const start=process.hrtime.bigint();setImmediate(()=>resolve(Math.round(Number(process.hrtime.bigint()-start)/1e6)))});const uptimeStr=formatUptime(Math.floor(process.uptime()));const elapsed=Date.now()-t0;const L=[];L.push("╔══════════════════════╗");L.push("║   ⚡ SunkenBot — UP   ║");L.push("╚══════════════════════╝");L.push(`🕐 ${nowHHMMSS()}`);L.push("");if(reloadOk){L.push("✅ Hot Reload نجح")}else if(reloadErr){L.push(`❌ فشل Reload: ${reloadErr.slice(0,60)}`)}else{L.push(`⚠️ Hot Reload انتهى مع أخطاء في ${fileErrors.length} ملف:`);for(const fe of fileErrors.slice(0,5)){L.push(`  ✗ ${fe.file}: ${fe.message.slice(0,80)}`)}if(fileErrors.length>5)L.push(`  … و${fileErrors.length-5} ملف آخر`)}L.push(`   📂 أوامر: ${fileCount} ملف (cmds + _modules)`);L.push(`   📂 مصدر:  ${sourceCount} ملف (كل src/)`);L.push(`   📂 أحداث: ${eventsCount} مُسجَّلة`);L.push("");L.push("🗑️ التنظيف:");if(cleanLines.length>0){cleanLines.forEach(l=>L.push(l));L.push(`  ✅ ${totalDeleted} ملف — ${formatBytes(totalFreed)} محررة`)}else{L.push("  ✅ الكاش نظيف")}if(clearedSessions>0)L.push(`  🧠 جلسات RAM: ${clearedSessions} جلسة محذوفة`);L.push(`  💾 متبقٍ: ${remFiles} ملف (${formatBytes(remSize)})`);L.push("");L.push("🖥️ ذاكرة العملية (Node):");L.push(`  • RSS: ${rss} MB   • Heap: ${heap} MB   • External: ${ext} MB`);L.push("");const containerMem=getContainerMemory();L.push("📦 ذاكرة الـ Container:");if(containerMem){const usedMB=containerMem.usage/1048576;if(containerMem.limit){const limitMB=containerMem.limit/1048576;const pct=containerMem.usage/containerMem.limit*100;let icon="🟢";if(pct>=90)icon="🔴";else if(pct>=75)icon="🟠";else if(pct>=60)icon="🟡";L.push(`  ${usageBar(pct)} ${icon} ${pct.toFixed(1)}%`);L.push(`  • ${usedMB.toFixed(1)} MB / ${limitMB.toFixed(0)} MB`);if(pct>=90)L.push(`  ⚠️ قريب جداً من حد OOM — خطر إعادة تشغيل قسري!`);else if(pct>=75)L.push(`  ⚠️ استهلاك مرتفع — راقب الاتجاه`)}else{L.push(`  • مستخدَم: ${usedMB.toFixed(1)} MB (الحد غير محدَّد)`)}}else{L.push("  ⚠️ غير متاح (لا يوجد cgroup — تشغيل محلي على الأرجح)")}L.push("");L.push("📊 الأداء:");L.push(`  • Loop Lag: ${pingMs}ms   • زمن العملية: ${elapsed}ms`);L.push(`  • Uptime:   ${uptimeStr}`);message.reply(L.join("\n"))}};
+import fs from "../utils/fsCompat.js";
+import path from "path";
+import { fileURLToPath } from "node:url";
+import { collectSystemUsage, formatBytes } from "../utils/systemUsage.js";
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const CACHE_ROOT = path.join(MODULE_DIR, "..", "..", "cache");
+const AI_DIRS = ["ai_sessions_gptx"];
+
+function nowHHMMSS() {
+  return new Date().toLocaleTimeString("en-GB", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    timeZone: process.env.TZ || "Europe/Berlin",
+  });
+}
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor(seconds % 86400 / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  const secs = Math.floor(seconds % 60);
+  const clock = [hours, minutes, secs].map(n => String(n).padStart(2, "0")).join(":");
+  return days ? `${days}ي ${clock}` : clock;
+}
+async function clearDir(dirPath) {
+  let deleted = 0, freed = 0;
+  try {
+    if (!await fs.pathExists(dirPath)) return { deleted, freed };
+    for (const file of await fs.readdir(dirPath)) {
+      if (["Readme.me", "empty.txt", ".gitkeep"].includes(file)) continue;
+      const fullPath = path.join(dirPath, file);
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.isFile()) { await fs.unlink(fullPath); deleted++; freed += stat.size; }
+      } catch {}
+    }
+  } catch {}
+  return { deleted, freed };
+}
+async function dirStats(dirPath) {
+  let count = 0, size = 0;
+  try {
+    if (!await fs.pathExists(dirPath)) return { count, size };
+    for (const file of await fs.readdir(dirPath)) {
+      if (["Readme.me", "empty.txt", ".gitkeep"].includes(file)) continue;
+      try {
+        const stat = await fs.stat(path.join(dirPath, file));
+        if (stat.isFile()) { count++; size += stat.size; }
+      } catch {}
+    }
+  } catch {}
+  return { count, size };
+}
+function countFiles(directory, recursive = false) {
+  let count = 0;
+  const walk = current => {
+    try {
+      for (const file of fs.readdirSync(current)) {
+        const fullPath = path.join(current, file);
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory() && recursive) walk(fullPath);
+        else if (stat.isFile() && file.endsWith(".js")) count++;
+      }
+    } catch {}
+  };
+  walk(directory);
+  return count;
+}
+function formatPercent(value) {
+  return Number.isFinite(value) ? `${value.toFixed(1)}%` : "غير متاح";
+}
+
+export default {
+  config: {
+    name: "up", version: "4.0.0", author: "SunkenBot Developer",
+    countDown: 10, role: 2, category: "إدارة وإشراف",
+    description: "قياس استهلاك النظام الفعلي وتنظيف كاش الذكاء الاصطناعي",
+    usage: ["{pn}up — قياس موارد التشغيل الفعلية"], hidden: true,
+  },
+  onStart: async function ({ message }) {
+    const started = Date.now();
+    let totalDeleted = 0, totalFreed = 0;
+    for (const dir of AI_DIRS) {
+      const result = await clearDir(path.join(CACHE_ROOT, dir));
+      totalDeleted += result.deleted;
+      totalFreed += result.freed;
+    }
+    let remainingFiles = 0, remainingBytes = 0;
+    for (const dir of AI_DIRS) {
+      const stats = await dirStats(path.join(CACHE_ROOT, dir));
+      remainingFiles += stats.count;
+      remainingBytes += stats.size;
+    }
+
+    const usage = await collectSystemUsage(250, MODULE_DIR);
+    const lines = [
+      "╔══════════════════════╗",
+      "║   ⚡ SunkenBot — UP   ║",
+      "╚══════════════════════╝",
+      `🕐 ${nowHHMMSS()}  •  Uptime: ${formatUptime(Math.floor(process.uptime()))}`,
+      "",
+      "🧠 استهلاك عملية Bun (قياس حالي):",
+      `  • RSS: ${formatBytes(usage.processMemory.rss)}  • Heap: ${formatBytes(usage.processMemory.heapUsed)}  • External: ${formatBytes(usage.processMemory.external)}`,
+      "📦 ذاكرة الحاوية (cgroup):",
+    ];
+    if (usage.containerMemory) {
+      const { used, limit } = usage.containerMemory;
+      const pct = limit ? used / limit * 100 : null;
+      lines.push(limit
+        ? `  • ${formatBytes(used)} / ${formatBytes(limit)} (${formatPercent(pct)})`
+        : `  • ${formatBytes(used)} مستخدمة؛ حد الذاكرة غير متاح`);
+    } else lines.push("  • غير متاحة في بيئة التشغيل هذه");
+
+    lines.push("", `⚙️ CPU (عينة فعلية ${usage.sampleMs.toFixed(0)}ms):`);
+    lines.push(`  • عملية Bun: ${formatPercent(usage.processCpuPercent)} من نواة واحدة`);
+    lines.push(`  • الحاوية: ${usage.containerCpuPercent === null ? "عداد cgroup غير متاح" : formatPercent(usage.containerCpuPercent)}`);
+
+    lines.push("", "💽 مساحة نظام الملفات عند المشروع:");
+    if (usage.disk) {
+      const diskPct = usage.disk.total > 0n
+        ? Number(usage.disk.used * 10000n / usage.disk.total) / 100
+        : null;
+      lines.push(`  • مستخدم ${formatBytes(usage.disk.used)} / ${formatBytes(usage.disk.total)} (${formatPercent(diskPct)})`);
+      lines.push(`  • متاح ${formatBytes(usage.disk.free)}`);
+    } else lines.push("  • غير متاحة");
+
+    lines.push("", "🌐 عدادات الشبكة الظاهرة للحاوية:");
+    if (usage.network) {
+      lines.push(`  • منذ بدء الواجهة: RX ${formatBytes(usage.network.rx)}  • TX ${formatBytes(usage.network.tx)}`);
+      if (usage.networkDelta) lines.push(`  • خلال عينة القياس: RX ${formatBytes(usage.networkDelta.rx)}  • TX ${formatBytes(usage.networkDelta.tx)}`);
+      lines.push("  • هذه عدادات الواجهة منذ تشغيل الحاوية، وليست إجمالي استهلاك Render الشهري.");
+    } else lines.push("  • عدادات الواجهة غير متاحة");
+
+    const perf = global.perfManager?.getMetrics?.();
+    if (perf) lines.push("", "📊 أداء الأوامر منذ بدء العملية:",
+      `  • متوسط الاستجابة: ${perf.avgResponseTimeMs}ms  • الأخطاء المسجلة: ${perf.errorCount}`);
+    lines.push("", "🗑️ تنظيف الكاش:",
+      totalDeleted ? `  • حُذف ${totalDeleted} ملف، واستُعيد ${formatBytes(totalFreed)}` : "  • لا توجد ملفات كاش لحذفها",
+      `  • المتبقي: ${remainingFiles} ملف (${formatBytes(remainingBytes)})`,
+      "",
+      `📂 الأوامر: ${countFiles(MODULE_DIR)} ملف  •  المصدر: ${countFiles(path.join(MODULE_DIR, ".."), true)} ملف  •  الأحداث: ${global.eventCommands?.length || 0}`,
+      `⏱️ زمن إعداد التقرير: ${Date.now() - started}ms`);
+
+    await message.reply(lines.join("\n"));
+  },
+};
