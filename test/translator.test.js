@@ -1,55 +1,53 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { translateTextStrict } from "../src/utils/translator.js";
+import { setGoogletransClientForTests, translateTextStrict } from "../src/utils/translator.js";
 
-function restoreEnv(name, original) {
-  if (original === undefined) delete process.env[name];
-  else process.env[name] = original;
-}
-
-test("all target languages use the authenticated HF Space translation API", async () => {
-  const originalUrl = process.env.HF_SPACE_URL;
-  const originalToken = process.env.INTERNAL_TOKEN;
-  const originalFetch = globalThis.fetch;
-  const arabicInput = `hello-${randomUUID()}`;
-  const frenchInput = `bonjour-${randomUUID()}`;
-  let requestCount = 0;
-
-  process.env.HF_SPACE_URL = "https://kiyunhai-g.hf.space";
-  process.env.INTERNAL_TOKEN = "test-internal-token";
-
-  globalThis.fetch = async (input, options = {}) => {
-    requestCount += 1;
-    assert.equal(String(input), "https://kiyunhai-g.hf.space/translate");
-    assert.equal(options.method, "POST");
-    assert.equal(options.headers["X-Internal-Token"], "test-internal-token");
-
-    const body = JSON.parse(options.body);
-    assert.equal(body.provider, "go-translate");
-    if (body.to === "ar") {
-      assert.equal(body.text, arabicInput);
-      return new Response(JSON.stringify({ text: "مرحبا" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    assert.equal(body.to, "fr");
-    assert.equal(body.text, frenchInput);
-    return new Response(JSON.stringify({ text: "bonjour traduit" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  };
+test("googletrans translates once, caches the result, and accepts at most 15,000 characters", async () => {
+  const calls = [];
+  setGoogletransClientForTests(async (text, options) => {
+    calls.push({ text, options });
+    return { text: `translated:${options.to}:${text}` };
+  });
 
   try {
-    assert.equal(await translateTextStrict(arabicInput, "ar"), "مرحبا");
-    assert.equal(await translateTextStrict(frenchInput, "fr"), "bonjour traduit");
-    assert.equal(requestCount, 2);
+    const input = `hello-${randomUUID()}`;
+    assert.equal(await translateTextStrict(input, "ar"), `translated:ar:${input}`);
+    assert.equal(await translateTextStrict(input, "ar"), `translated:ar:${input}`);
+    assert.equal(calls.length, 1, "a repeated translation should use the cache");
+    assert.deepEqual(calls[0].options, { to: "ar", raw: false });
+
+    const suffix = randomUUID();
+    const boundaryText = "x".repeat(15_000 - suffix.length) + suffix;
+    const boundaryResult = await translateTextStrict(boundaryText, "en");
+    assert.ok(boundaryResult.startsWith("translated:en:"));
+    assert.equal(calls.at(-1).text.length, 15_000);
+
+    const callsBeforeOversize = calls.length;
+    assert.equal(await translateTextStrict("x".repeat(15_001), "en"), null);
+    assert.equal(calls.length, callsBeforeOversize, "oversized input must not reach googletrans");
   } finally {
-    globalThis.fetch = originalFetch;
-    restoreEnv("HF_SPACE_URL", originalUrl);
-    restoreEnv("INTERNAL_TOKEN", originalToken);
+    setGoogletransClientForTests();
+  }
+});
+
+test("HTTP 429 opens a cooldown instead of repeatedly contacting Google", async () => {
+  let calls = 0;
+  setGoogletransClientForTests(async () => {
+    calls += 1;
+    throw {
+      response: {
+        status: 429,
+        headers: { "retry-after": "3600" },
+      },
+    };
+  });
+
+  try {
+    assert.equal(await translateTextStrict(`limited-${randomUUID()}`, "ar"), null);
+    assert.equal(await translateTextStrict(`during-cooldown-${randomUUID()}`, "ar"), null);
+    assert.equal(calls, 1, "do not send another request while the cooldown is active");
+  } finally {
+    setGoogletransClientForTests();
   }
 });

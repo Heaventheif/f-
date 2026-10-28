@@ -1,18 +1,21 @@
 "use strict";
 
+import googletrans from "googletrans";
 import * as cache from "./cache.js";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { getHfBase, getInternalToken } from "./hfClient.js";
 
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
-const MAX_TEXT_LEN = 45e3;
-const CHUNK_LEN = 3500;
-const REQUEST_TIMEOUT_MS = 25e3;
-const MIN_REQUEST_GAP_MS = 900;
-const MAX_RETRIES = 4;
-const HF_TRANSLATION_PROVIDER = "go-translate";
+// googletrans يفرض حداً أقصى قدره 15,000 وحدة UTF-16 لكل نص.
+const MAX_TEXT_LEN = 15_000;
+const CHUNK_LEN = 15_000;
+const MIN_REQUEST_GAP_MS = 2_000;
+const MAX_RETRIES = 1;
+const RETRY_BACKOFF_MS = 2_000;
+const RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1e3;
+const BLOCK_COOLDOWN_MS = 60 * 60 * 1e3;
+const MAX_COOLDOWN_MS = 6 * 60 * 60 * 1e3;
 const DISK_CACHE_FILE = path.resolve(process.cwd(), "data", "translator-cache.json");
 const LANG_ALIASES = { zh: "zh-CN", "zh-cn": "zh-CN", "zh-tw": "zh-TW", tl: "fil", no: "nb", iw: "he" };
 
@@ -22,6 +25,8 @@ let diskCacheLoadPromise = null;
 let saveQueue = Promise.resolve();
 let requestQueue = Promise.resolve();
 let lastRequestAt = 0;
+let providerCooldownUntil = 0;
+let googletransClient = googletrans;
 
 function normalizeLang(code) {
   const language = String(code || "").trim();
@@ -110,84 +115,88 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function queuedRequest(url, options = {}) {
+function responseStatus(error) {
+  return Number(error?.response?.status || error?.status || 0);
+}
+
+function retryAfterMs(error) {
+  const headers = error?.response?.headers;
+  const value = headers?.get?.("retry-after") ?? headers?.["retry-after"] ?? headers?.["Retry-After"];
+  if (value == null) return 0;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1e3, MAX_COOLDOWN_MS);
+  const dateMs = Date.parse(String(value)) - Date.now();
+  return Number.isFinite(dateMs) && dateMs > 0 ? Math.min(dateMs, MAX_COOLDOWN_MS) : 0;
+}
+
+function openProviderCooldown(status, error) {
+  const minimum = status === 403 ? BLOCK_COOLDOWN_MS : RATE_LIMIT_COOLDOWN_MS;
+  const duration = Math.min(Math.max(minimum, retryAfterMs(error)), MAX_COOLDOWN_MS);
+  providerCooldownUntil = Math.max(providerCooldownUntil, Date.now() + duration);
+}
+
+function isRetryable(error) {
+  if (error?.code === "GOOGLETRANS_COOLDOWN") return false;
+  const status = responseStatus(error);
+  if (status === 403 || status === 429) return false;
+  if (status) return status === 408 || status >= 500;
+  return true;
+}
+
+async function queuedGoogletrans(text, targetLanguage) {
   const run = requestQueue.then(async () => {
+    if (Date.now() < providerCooldownUntil) {
+      const error = new Error("googletrans cooling down after an upstream limit");
+      error.code = "GOOGLETRANS_COOLDOWN";
+      throw error;
+    }
+
     const wait = MIN_REQUEST_GAP_MS - (Date.now() - lastRequestAt);
     if (wait > 0) await sleep(wait);
+
+    if (Date.now() < providerCooldownUntil) {
+      const error = new Error("googletrans cooling down after an upstream limit");
+      error.code = "GOOGLETRANS_COOLDOWN";
+      throw error;
+    }
+
     lastRequestAt = Date.now();
-    return fetchWithRetry(url, options);
+    try {
+      const result = await googletransClient(text, {
+        to: normalizeLang(targetLanguage),
+        raw: false,
+      });
+      const translated = typeof result?.text === "string" ? result.text.trim() : "";
+      if (!translated) {
+        const error = new Error("googletrans returned an empty translation");
+        error.code = "GOOGLETRANS_EMPTY_RESULT";
+        throw error;
+      }
+      return translated;
+    } catch (error) {
+      const status = responseStatus(error);
+      if (status === 403 || status === 429) openProviderCooldown(status, error);
+      throw error;
+    }
   });
+
   requestQueue = run.catch(() => {});
   return run;
 }
 
-async function fetchWithRetry(url, options = {}) {
+async function translateChunk(text, targetLanguage) {
   let lastError;
-
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
     try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "SunkenBot/5.0",
-          ...(options.headers || {}),
-        },
-      });
-
-      if ([429, 502, 503, 504].includes(response.status)) {
-        const error = new Error(`Translation HTTP ${response.status}`);
-        error.retryAfter = Number(response.headers.get("retry-after")) * 1e3 || 0;
-        throw error;
-      }
-      if (!response.ok) throw new Error(`Translation HTTP ${response.status}`);
-      return await response.json();
+      return await queuedGoogletrans(text, targetLanguage);
     } catch (error) {
       lastError = error;
-      const retryable =
-        error?.name === "AbortError" ||
-        error?.retryAfter ||
-        /fetch failed|network|HTTP 429|HTTP 502|HTTP 503|HTTP 504/i.test(String(error?.message || error));
-      if (!retryable || attempt === MAX_RETRIES) break;
-
-      const exponentialDelay = Math.min(30e3, 1500 * 2 ** attempt);
-      await sleep(Math.max(exponentialDelay, error.retryAfter || 0) + Math.floor(Math.random() * 500));
-    } finally {
-      clearTimeout(timer);
+      if (!isRetryable(error) || attempt === MAX_RETRIES) break;
+      await sleep(RETRY_BACKOFF_MS * (attempt + 1) + Math.floor(Math.random() * 500));
     }
   }
-
-  throw lastError || new Error("Translation request failed");
-}
-
-async function translateViaHfSpace(text, targetLanguage) {
-  const baseUrl = getHfBase();
-  const token = String(getInternalToken() || "").trim();
-  if (!token) throw new Error("INTERNAL_TOKEN غير مضبوط للوصول إلى Hugging Face Space");
-
-  const data = await queuedRequest(`${baseUrl}/translate`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "X-Internal-Token": token,
-    },
-    body: JSON.stringify({
-      text,
-      to: targetLanguage,
-      provider: HF_TRANSLATION_PROVIDER,
-    }),
-  });
-
-  const translated = typeof data?.text === "string" ? data.text.trim() : "";
-  return translated || null;
-}
-
-async function translateChunk(text, targetLanguage) {
-  return translateViaHfSpace(text, targetLanguage);
+  throw lastError || new Error("googletrans translation failed");
 }
 
 async function translateText(text, targetLanguage, fallbackToOriginal = true) {
@@ -211,7 +220,6 @@ async function translateText(text, targetLanguage, fallbackToOriginal = true) {
       }
 
       const translated = await translateChunk(chunk, normalizedTarget);
-      if (!translated) throw new Error("Empty translation response");
       translatedChunks.push(translated);
       await setCached(normalizedTarget, chunk, translated);
     }
@@ -222,7 +230,16 @@ async function translateText(text, targetLanguage, fallbackToOriginal = true) {
       return result;
     }
   } catch (error) {
-    console.warn("[TRANSLATOR] Translation endpoint:", String(error?.message || error).slice(0, 120));
+    const status = responseStatus(error);
+    if (status === 429) {
+      console.warn("[TRANSLATOR] googletrans rate limit; requests paused temporarily.");
+    } else if (status === 403) {
+      console.warn("[TRANSLATOR] googletrans access denied; requests paused temporarily.");
+    } else if (error?.code === "GOOGLETRANS_COOLDOWN") {
+      console.warn("[TRANSLATOR] googletrans cooldown is active.");
+    } else {
+      console.warn(`[TRANSLATOR] googletrans request failed (status=${status || "unknown"}).`);
+    }
   }
 
   return fallbackToOriginal ? text : null;
@@ -248,4 +265,12 @@ async function translateToEnglish(text) {
   return translateText(text, "en");
 }
 
-export { translateTextStrict, translateToArabic, translateToEnglish };
+// واجهة حقن داخلية للاختبارات فقط؛ لا تُستخدم في التطبيق.
+function setGoogletransClientForTests(client) {
+  googletransClient = typeof client === "function" ? client : googletrans;
+  providerCooldownUntil = 0;
+  lastRequestAt = 0;
+  requestQueue = Promise.resolve();
+}
+
+export { translateTextStrict, translateToArabic, translateToEnglish, setGoogletransClientForTests };
