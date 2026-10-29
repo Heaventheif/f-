@@ -264,4 +264,11 @@ async function translateToEnglish(text) {
   return translateText(text, "en");
 }
 
-export { translateTextStrict, translateToArabic, translateToEnglish };
+function setGoogletransClientForTests(client) {
+  googletransClient = typeof client === "function" ? client : googletrans;
+  providerCooldownUntil = 0;
+  lastRequestAt = 0;
+  requestQueue = Promise.resolve();
+}
+
+export { translateTextStrict, translateToArabic, translateToEnglish, setGoogletransClientForTests };
