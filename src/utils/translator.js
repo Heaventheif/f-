@@ -7,7 +7,6 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
-// googletrans يفرض حداً أقصى قدره 15,000 وحدة UTF-16 لكل نص.
 const MAX_TEXT_LEN = 15_000;
 const CHUNK_LEN = 15_000;
 const MIN_REQUEST_GAP_MS = 2_000;
@@ -265,12 +264,4 @@ async function translateToEnglish(text) {
   return translateText(text, "en");
 }
 
-// واجهة حقن داخلية للاختبارات فقط؛ لا تُستخدم في التطبيق.
-function setGoogletransClientForTests(client) {
-  googletransClient = typeof client === "function" ? client : googletrans;
-  providerCooldownUntil = 0;
-  lastRequestAt = 0;
-  requestQueue = Promise.resolve();
-}
-
-export { translateTextStrict, translateToArabic, translateToEnglish, setGoogletransClientForTests };
+export { translateTextStrict, translateToArabic, translateToEnglish };

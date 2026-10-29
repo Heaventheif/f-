@@ -9,8 +9,7 @@
   },
   "scripts": {
     "build": "bun install --production",
-    "start": "bun --smol main.js",
-    "test": "bun test"
+    "start": "bun --smol main.js"
   },
   "overrides": {
     "cheerio": "^1.2.0"
