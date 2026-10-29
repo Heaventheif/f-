@@ -23,7 +23,7 @@ function build(action) {
       guide: { ar: `{pn}${action} <أمر>\n{pn}${action} bot` },
     },
 
-    async run({ event, args, role, message, prefix }) {
+    async onStart({ event, args, role, message, prefix }) {
       const reply = (t) => message.reply(t);
       const threadID = event?.threadID;
 

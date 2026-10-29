@@ -7,9 +7,9 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
-const MAX_TEXT_LEN = 15_000;
 const CHUNK_LEN = 15_000;
-const MIN_REQUEST_GAP_MS = 2_000;
+const MAX_DISK_ENTRIES = 5000;
+const MIN_REQUEST_GAP_MS = 1_000;
 const MAX_RETRIES = 1;
 const RETRY_BACKOFF_MS = 2_000;
 const RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1e3;
@@ -50,6 +50,7 @@ async function loadDiskCache() {
           diskCache.set(key, entry);
         }
       }
+      evictDiskCache();
     } catch (error) {
       if (error?.code !== "ENOENT") {
         console.warn("[TRANSLATOR] Could not load disk cache:", String(error?.message || error).slice(0, 120));
@@ -61,6 +62,35 @@ async function loadDiskCache() {
   })();
 
   return diskCacheLoadPromise;
+}
+
+function evictDiskCache() {
+  // Map preserves insertion order: first key = least recently used.
+  while (diskCache.size > MAX_DISK_ENTRIES) {
+    const oldest = diskCache.keys().next().value;
+    if (oldest === undefined) break;
+    diskCache.delete(oldest);
+  }
+}
+
+let persistTimer = null;
+const PERSIST_DEBOUNCE_MS = 5000;
+
+function persistDiskCacheDebounced() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistDiskCache();
+  }, PERSIST_DEBOUNCE_MS);
+  persistTimer.unref?.();
+}
+
+async function flushTranslatorCache() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (diskCacheLoaded) await persistDiskCache();
 }
 
 function persistDiskCache() {
@@ -80,7 +110,11 @@ function persistDiskCache() {
 function getCached(language, text) {
   const key = cacheKey(language, text);
   const entry = diskCache.get(key);
-  if (entry && entry.expiresAt > Date.now()) return entry.value;
+  if (entry && entry.expiresAt > Date.now()) {
+    diskCache.delete(key);
+    diskCache.set(key, entry); // LRU touch
+    return entry.value;
+  }
   if (entry) diskCache.delete(key);
 
   const memoryValue = cache.get(`tr_${normalizeLang(language)}:${text}`);
@@ -89,9 +123,11 @@ function getCached(language, text) {
 
 async function setCached(language, text, value) {
   const key = cacheKey(language, text);
+  diskCache.delete(key);
   diskCache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+  evictDiskCache();
   cache.set(`tr_${normalizeLang(language)}:${text}`, value, CACHE_TTL_MS);
-  await persistDiskCache();
+  persistDiskCacheDebounced();
 }
 
 function splitText(text, maxLength = CHUNK_LEN) {
@@ -200,7 +236,6 @@ async function translateChunk(text, targetLanguage) {
 
 async function translateText(text, targetLanguage, fallbackToOriginal = true) {
   if (typeof text !== "string" || !text.trim()) return text;
-  if (text.length > MAX_TEXT_LEN) return fallbackToOriginal ? text : null;
 
   const normalizedTarget = normalizeLang(targetLanguage);
   await loadDiskCache();
@@ -211,15 +246,19 @@ async function translateText(text, targetLanguage, fallbackToOriginal = true) {
     const chunks = splitText(text);
     const translatedChunks = [];
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      // splitText cuts at a space/newline that lands at the START of the next chunk,
+      // but translations are trimmed -> restore the boundary whitespace when re-joining.
+      const lead = i > 0 ? chunk.match(/^\s*/)[0] : "";
       const chunkCached = getCached(normalizedTarget, chunk);
       if (chunkCached) {
-        translatedChunks.push(chunkCached);
+        translatedChunks.push(lead + chunkCached);
         continue;
       }
 
       const translated = await translateChunk(chunk, normalizedTarget);
-      translatedChunks.push(translated);
+      translatedChunks.push(lead + translated);
       await setCached(normalizedTarget, chunk, translated);
     }
 
@@ -271,4 +310,4 @@ function setGoogletransClientForTests(client) {
   requestQueue = Promise.resolve();
 }
 
-export { translateTextStrict, translateToArabic, translateToEnglish, setGoogletransClientForTests };
+export { flushTranslatorCache, translateTextStrict, translateToArabic, translateToEnglish, setGoogletransClientForTests };

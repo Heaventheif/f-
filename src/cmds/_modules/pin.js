@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import { searchImagesWithFallback, downloadImagesWithLimit } from "../../utils/pinterestProviders.js";
+import { sendImageBatches as deliverImageBatches } from "../../utils/mangaDelivery.js";
 
 const BATCH_SIZE = 5;
 
@@ -54,35 +55,43 @@ export async function sendImageBatches(api, threadID, files, sourceUrls, {
   const failures = [];
   let sent = 0;
 
-  for (let i = 0; i < files.length; i += batchSize) {
-    const batch = files.slice(i, i + batchSize);
-    const streams = batch.map(openImageStream);
-    try {
-      await api.sendMessage({ body: "", attachment: streams }, threadID);
-      sent += batch.length;
-      await closeStreams(streams);
-    } catch (batchError) {
-      await closeStreams(streams);
-      console.warn("[pin] فشل إرسال دفعة؛ ستُجرّب الصور منفردة:", batchError?.message || batchError);
+  let cursor = 0;
+  await deliverImageBatches({
+    files,
+    batchSize,
+    threadID,
+    delayMs: pauseMs,
+    buildBody: () => "",
+    send: async (payload, tid, done) => {
+      const streams = payload.attachment;
+      streams.forEach(stream => stream.once?.("error", () => {}));
+      const batch = files.slice(cursor, cursor + streams.length);
+      cursor += streams.length;
+      try {
+        await api.sendMessage(payload, tid);
+        sent += batch.length;
+        await closeStreams(streams);
+      } catch (batchError) {
+        await closeStreams(streams);
+        console.warn("[pin] فشل إرسال دفعة؛ ستُجرّب الصور منفردة:", batchError?.message || batchError);
 
-      for (const file of batch) {
-        const stream = openImageStream(file);
-        try {
-          await api.sendMessage({ body: "", attachment: stream }, threadID);
-          sent++;
-          await closeStreams([stream]);
-        } catch (error) {
-          await closeStreams([stream]);
-          failures.push({ file, error });
-          console.warn("[pin] فشل إرسال صورة منفردة:", error?.message || error);
+        for (const file of batch) {
+          const stream = openImageStream(file);
+          try {
+            await api.sendMessage({ body: "", attachment: stream }, tid);
+            sent++;
+            await closeStreams([stream]);
+          } catch (error) {
+            await closeStreams([stream]);
+            failures.push({ file, error });
+            console.warn("[pin] فشل إرسال صورة منفردة:", error?.message || error);
+          }
         }
+      } finally {
+        done();
       }
-    }
-
-    if (i + batchSize < files.length && pauseMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, pauseMs));
-    }
-  }
+    },
+  });
 
   if (failures.length > 0) {
     const links = formatSourceLinks(sourceUrls);

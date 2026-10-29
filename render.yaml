@@ -22,7 +22,11 @@ services:
       - key: PIN
         sync: false
       - key: MAX_CONCURRENT_COMMANDS
-        value: "10"
+        value: "5"
+      - key: MONITOR_INTERVAL_MIN
+        value: "30"
+      - key: PG_POOL_MAX
+        value: "2"
       - key: FCA_ENABLE_KEEPALIVE
         value: "true"
       - key: INTERNAL_TOKEN
