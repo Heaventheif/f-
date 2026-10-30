@@ -1,5 +1,5 @@
 import { readdir, stat } from "node:fs/promises";
-import { pathExists } from "../utils/fsCompat.js";
+import fs from "../utils/fsCompat.js";
 import path from "path";
 import { fileURLToPath } from "node:url";
 import { collectSystemUsage, formatBytes } from "../utils/systemUsage.js";
@@ -32,9 +32,9 @@ async function clearDir(dirPath) {
       try {
         const stat = await fs.stat(fullPath);
         if (stat.isFile()) { await fs.unlink(fullPath); deleted++; freed += stat.size; }
-      } catch {}
+      } catch (e) { console.warn("[UP:CLEAR]", fullPath, e?.message || e); }
     }
-  } catch {}
+  } catch (e) { console.warn("[UP:CLEAR]", dirPath, e?.message || e); }
   return { deleted, freed };
 }
 async function dirStats(dirPath) {
@@ -46,9 +46,9 @@ async function dirStats(dirPath) {
       try {
         const stat = await fs.stat(path.join(dirPath, file));
         if (stat.isFile()) { count++; size += stat.size; }
-      } catch {}
+      } catch (e) { console.warn("[UP:STATS]", file, e?.message || e); }
     }
-  } catch {}
+  } catch (e) { console.warn("[UP:STATS]", dirPath, e?.message || e); }
   return { count, size };
 }
 async function countFiles(directory, recursive = false) {
