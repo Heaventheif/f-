@@ -4,5 +4,4 @@ import img from "./_modules/img.js";
 import canva from "./_modules/canva.js";
 import slap from "./_modules/slap.js";
 import pin from "./_modules/pin.js";
-import ani from "./_modules/ani.js";
-export const commands = [draw, img, canva, slap, pin, ani];
+export const commands = [draw, img, canva, slap, pin];
