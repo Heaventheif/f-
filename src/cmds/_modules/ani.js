@@ -133,13 +133,76 @@ async function uploadTo0x0(buffer) {
   return url;
 }
 
+async function uploadToLitterbox(buffer) {
+  const form = new FormData();
+  form.append("reqtype", "fileupload");
+  form.append("time", "1h");
+  form.append("fileToUpload", new Blob([buffer], { type: "image/jpeg" }), `img_${Date.now()}.jpg`);
+  const res = await http.post(
+    "https://litterbox.catbox.moe/resources/internals/api.php",
+    form,
+    { timeout: 60000, headers: { "User-Agent": BROWSER_UA } }
+  );
+  const url = String(res.data || "").trim();
+  if (!/^https:\/\/litter\.catbox\.moe\//.test(url)) throw new Error("رد غير صالح من litterbox");
+  return url;
+}
+
+async function uploadToTmpfiles(buffer) {
+  const form = new FormData();
+  form.append("file", new Blob([buffer], { type: "image/jpeg" }), `img_${Date.now()}.jpg`);
+  const res = await http.post("https://tmpfiles.org/api/v1/upload", form, {
+    timeout: 60000,
+    headers: { "User-Agent": BROWSER_UA },
+  });
+  const url = res.data?.data?.url;
+  if (!url || !/^https?:\/\//.test(url)) throw new Error("رد غير صالح من tmpfiles.org");
+  // Convert the page link to a direct-download link
+  return url.replace("tmpfiles.org/", "tmpfiles.org/dl/").replace(/^http:/, "https:");
+}
+
+async function uploadToUguu(buffer) {
+  const form = new FormData();
+  form.append("files[]", new Blob([buffer], { type: "image/jpeg" }), `img_${Date.now()}.jpg`);
+  const res = await http.post("https://uguu.se/upload", form, {
+    timeout: 60000,
+    headers: { "User-Agent": BROWSER_UA },
+  });
+  const url = res.data?.files?.[0]?.url;
+  if (!url || !/^https?:\/\//.test(url)) throw new Error("رد غير صالح من uguu.se");
+  return url;
+}
+
+const UPLOADERS = [
+  { name: "catbox", fn: uploadToCatbox },
+  { name: "litterbox", fn: uploadToLitterbox },
+  { name: "tmpfiles", fn: uploadToTmpfiles },
+  { name: "uguu", fn: uploadToUguu },
+  { name: "0x0.st", fn: uploadTo0x0 },
+];
+
+// Try every host in order; retry once on transient 5xx / network errors.
 async function uploadImage(buffer) {
-  try {
-    return await uploadToCatbox(buffer);
-  } catch (e) {
-    console.warn("[ANI] catbox فشل، تجربة 0x0:", e.message);
+  const errors = [];
+  for (const { name, fn } of UPLOADERS) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await fn(buffer);
+      } catch (e) {
+        const msg = String(e?.message || e).slice(0, 80);
+        console.warn(`[ANI] ${name} فشل (محاولة ${attempt}):`, msg);
+        const transient = /status code 5\d\d|timeout|ECONN|ENETWORK|fetch failed/i.test(msg);
+        if (attempt === 2 || !transient) {
+          errors.push(`${name}: ${msg}`);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
   }
-  return await uploadTo0x0(buffer);
+  const err = new Error("فشلت جميع خدمات رفع الصورة.");
+  err.details = errors;
+  throw err;
 }
 
 /* ---------------- محركات التحويل ---------------- */
@@ -182,7 +245,7 @@ async function tryPollinations(imageUrl, style, model) {
   return buf;
 }
 
-async function transform(imageBuffer, style) {
+async function transform(imageBuffer, style, sourceUrl) {
   const errors = [];
 
   if (process.env.DEEPAI_KEY) {
@@ -194,11 +257,26 @@ async function transform(imageBuffer, style) {
     }
   }
 
+  // Try the Messenger CDN URL directly first (signed fbcdn links are usually
+  // publicly fetchable), so no intermediate upload host is needed.
+  if (/^https:\/\//i.test(sourceUrl || "")) {
+    try {
+      const buffer = await tryPollinations(sourceUrl, style, "kontext");
+      return { buffer, provider: "Pollinations (kontext)" };
+    } catch (e) {
+      errors.push(`direct-cdn: ${String(e.message || e).slice(0, 80)}`);
+      console.warn("[ANI] الرابط المباشر فشل، سيتم الرفع:", e.message);
+    }
+  }
+
   let publicUrl;
   try {
     publicUrl = await uploadImage(imageBuffer);
   } catch (e) {
-    throw new Error(`فشل رفع الصورة: ${e.message}`);
+    // Keep per-host details so the user sees exactly which hosts failed and why
+    const err = new Error(`فشل رفع الصورة: ${e.message}`);
+    err.details = [...errors, ...(e.details || [])];
+    throw err;
   }
 
   for (const model of ["kontext", "flux"]) {
@@ -280,7 +358,7 @@ export default {
       await updateStatus(
         `🎨 تحويل إلى ${STYLES[style].label}... (قد يستغرق 30–60 ثانية)`
       );
-      const { buffer: resultBuf, provider } = await transform(buffer, style);
+      const { buffer: resultBuf, provider } = await transform(buffer, style, image.url);
 
       if (statusMsgId) {
         try {

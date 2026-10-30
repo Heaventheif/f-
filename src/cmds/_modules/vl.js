@@ -2,6 +2,7 @@
 
 import { Buffer } from "node:buffer";
 import http from "../../utils/fetchHttp.js";
+import { hostBuffer, isSelfHostAvailable, ttlLabel } from "../../utils/tempHost.js";
 
 const MAX_BYTES = 50 * 1024 * 1024;
 const BROWSER_UA =
@@ -156,7 +157,17 @@ async function uploadFileIO(buffer, filename, contentType) {
   return url;
 }
 
+// Primary: host the file on the bot's own web server (no third-party limits,
+// no datacenter-IP blocking). External hosts are only a fallback.
+async function uploadSelfHost(buffer, filename) {
+  if (!isSelfHostAvailable()) throw new Error("الاستضافة الذاتية غير مفعّلة (لا يوجد رابط https عام)");
+  const ext = String(filename).split(".").pop();
+  const { url } = await hostBuffer(buffer, ext);
+  return url;
+}
+
 const PROVIDERS = [
+  { name: "self-host",    fn: uploadSelfHost,  ttl: ttlLabel() },
   { name: "catbox.moe",   fn: uploadCatbox,    ttl: "دائم" },
   { name: "0x0.st",       fn: upload0x0,       ttl: "حتى 365 يوماً" },
   { name: "litterbox",    fn: uploadLitterbox, ttl: "72 ساعة" },
@@ -260,13 +271,7 @@ export default {
 
       return global.safeSend(
         api,
-        `🎙️ تم رفع الرسالة الصوتية\n` +
-          `━━━━━━━━━━━━━━━━\n` +
-          `🔗 ${url}\n` +
-          `📦 الحجم: ${formatSize(buffer.length)}\n` +
-          `🎵 الصيغة: ${ext.toUpperCase()}\n` +
-          `🌐 المصدر: ${provider}\n` +
-          `⏱️ مدة الرابط: ${ttl}`,
+        `${url}\n⏱️ مدة الرابط: ${ttl}`,
         threadID,
         null,
         messageID
