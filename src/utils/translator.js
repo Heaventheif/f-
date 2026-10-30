@@ -9,7 +9,7 @@ import path from "node:path";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 const CHUNK_LEN = 15_000;
 const MAX_DISK_ENTRIES = 5000;
-const MIN_REQUEST_GAP_MS = 1_000;
+const MIN_REQUEST_GAP_MS = 2_000;
 const MAX_RETRIES = 1;
 const RETRY_BACKOFF_MS = 2_000;
 const RATE_LIMIT_COOLDOWN_MS = 15 * 60 * 1e3;
