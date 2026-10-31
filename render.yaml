@@ -53,6 +53,8 @@ services:
         sync: false
       - key: FERDEV_API_KEY
         sync: false
+      - key: FIRECRAWL_API
+        sync: false
       - key: YT_HEDGE_MS
         value: "2000"
       - key: FCA_RATE_UPLOAD
