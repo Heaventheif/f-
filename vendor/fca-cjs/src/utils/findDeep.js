@@ -1,1 +1,0 @@
-"use strict";function findDeep(node,predicate){if(node===null||typeof node!=="object")return void 0;for(const key of Object.keys(node)){const value=node[key];if(predicate(value,key,node))return{value,key,parent:node};const match=findDeep(value,predicate);if(match)return match}return void 0}module.exports=findDeep;
