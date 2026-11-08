@@ -6,7 +6,7 @@
       "name": "SunkenBot",
       "dependencies": {
         "cheerio": "^1.2.0",
-        "fcanew-r3nz75": "latest",
+        "fcanew-r3nz75": "10.1.15",
         "form-data": "^4.0.6",
         "googletrans": "1.0.29",
         "https-proxy-agent": "^7.0.6",
