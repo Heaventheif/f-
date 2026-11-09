@@ -69,5 +69,3 @@ services:
         value: "0"
       - key: API_URL
         value: https://yy-two-ruddy.vercel.app
-      - key: TIKTOK_API
-        value: https://heaventheif-ts.vercel.app
