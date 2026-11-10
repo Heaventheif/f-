@@ -3,7 +3,7 @@ import fs from "../../utils/fsCompat.js";
 import { searchYoutube } from "../../utils/youtubeSearch.js";
 import { downloadYoutubeAudio, downloadYoutubeVideo } from "../../utils/yyApi.js";
 import { removeTempFile } from "../../utils/mediaFile.js";
-import { buildListText, attachReactionPicker } from "../../utils/reactionPicker.js";
+import { buildListText } from "../../utils/reactionPicker.js";
 import { splitFile, cleanupParts, NEEDS_SPLIT } from "../../utils/mediaSplitter.js";
 
 const HELP = "yt <اسم> | yt s <اسم> للقائمة | أضف mp4 للفيديو";
@@ -53,7 +53,7 @@ async function downloadAndSend(api, threadID, messageID, ytUrl, wantMp4, listMsg
 function registerNumericReply(sent, event, list, threadID, messageID, api, commandName = "yt") {
   if (!sent?.messageID || !global.Kagenou?.replies) return;
   const sentID = String(sent.messageID);
-  global.Kagenou.replies[sentID] = {
+  const entry = {
     author: event.senderID == null ? null : String(event.senderID),
     threadID: String(threadID),
     cmdKey: commandName,
@@ -61,12 +61,16 @@ function registerNumericReply(sent, event, list, threadID, messageID, api, comma
     callback: async ({ event: replyEvent }) => {
       const text = String(replyEvent?.body || "").trim().toLowerCase();
       const match = text.match(/^(?:(mp4)\s*)?(\d{1,2})$/);
-      if (!match) return;
-      const index = Number(match[2]) - 1;
-      if (index < 0 || index >= list.length) return;
+      const index = match ? Number(match[2]) - 1 : -1;
+      if (index < 0 || index >= list.length) {
+        // keep the list alive: router deletes the entry before calling us
+        global.Kagenou.replies[sentID] = entry;
+        return;
+      }
       await downloadAndSend(api, threadID, messageID, list[index].url, Boolean(match[1]), sent.messageID);
     },
   };
+  global.Kagenou.replies[sentID] = entry;
 }
 
 export default {
@@ -101,11 +105,6 @@ export default {
         global.safeSend(api, buildListText(list, wantMp4), threadID, (error, info) => error ? reject(error) : resolve(info), messageID);
       });
       registerNumericReply(sent, event, list, threadID, messageID, api);
-      attachReactionPicker({
-        sentMessageID: sent?.messageID, authorID: event.senderID, list, threadID,
-        commandName: "yt",
-        onPick: (chosen, asMp4) => downloadAndSend(api, threadID, messageID, chosen.url, asMp4, sent.messageID),
-      });
     } catch (error) {
       console.error("[YT:ERR]", error?.message || error);
       await global.safeSend(api, "لم أجد نتائج مناسبة.", threadID, null, messageID).catch(() => {});
