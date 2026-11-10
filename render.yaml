@@ -5,7 +5,7 @@ services:
     dockerfilePath: ./Dockerfile
     region: frankfurt
     plan: free
-    healthCheckPath: /health
+    healthCheckPath: /ready
     envVars:
       - key: NODE_ENV
         value: production
