@@ -1,5 +1,6 @@
 "use strict";
 // إدارة طلبات المراسلة وطلبات الصداقة عبر مكتبة bun-fca المدمجة (global.botApi)
+import{healSessionCookies}from"../fca/fcaCompat.js";
 
 export class RequestError extends Error {
   constructor(message, status = 500, code = "INTERNAL") {
@@ -41,10 +42,35 @@ function call(api, method, ...args) {
   });
 }
 
+function isSessionError(e) {
+  const msg = String(e?.message || "");
+  const code = String(e?.error || e?.code || "");
+  if (code === "login_blocked" || code === "SESSION_INVALID") return true;
+  return /blocked the login|1357001|login\.php|not logged in|session logged out/i.test(msg);
+}
+
 function wrapFbError(e, ctx) {
   if (e instanceof RequestError) return e;
+  if (isSessionError(e)) {
+    console.error(`[REQUESTS:${ctx}] جلسة HTTP مرفوضة من فيسبوك:`, e?.message || e);
+    return new RequestError("انتهت صلاحية جلسة فيسبوك للطلبات عبر HTTP — أعد ضبط APPSTATE من متصفح موثوق", 503, "SESSION_INVALID");
+  }
   console.error(`[REQUESTS:${ctx}]`, e?.stack || e?.message || e);
   return new RequestError("فشل الطلب من Facebook", 502, "UPSTREAM_ERROR");
+}
+
+// استدعاء مع إصلاح ذاتي: عند رفض الجلسة (1357001) يُعاد حقن كوكيز c_user/xs
+// من آخر حالة صالحة ثم تُحاول العملية مرة واحدة إضافية قبل الفشل.
+async function callHealable(ctx, api, method, ...args) {
+  try {
+    return await call(api, method, ...args);
+  } catch (e) {
+    if (!isSessionError(e)) throw e;
+    const healed = healSessionCookies(global.botApi);
+    if (!healed.length) throw e;
+    console.warn(`[REQUESTS:${ctx}] 🔧 أُعيدت كوكيز الجلسة (${healed.join(", ")}) — إعادة المحاولة...`);
+    return await call(api, method, ...args);
+  }
 }
 
 export function validateId(id, label = "id") {
@@ -94,7 +120,7 @@ function normThread(t, folder) {
 export async function listFriends() {
   const api = getApi("getFriendsList");
   try {
-    const list = await call(api, "getFriendsList");
+    const list = await callHealable("friends", api, "getFriendsList");
     const items = (Array.isArray(list) ? list : []).map(u => ({
       userID: str(u.userID ?? u.id, 30),
       name: str(u.fullName || u.name),
@@ -114,7 +140,7 @@ export async function listMessages({ folder, limit } = {}) {
   const l = parseLimit(limit);
   const api = getApi("getThreadList");
   try {
-    const list = await call(api, "getThreadList", l, null, [f]);
+    const list = await callHealable("messages", api, "getThreadList", l, null, [f]);
     const items = (Array.isArray(list) ? list : []).map(t => normThread(t, f)).filter(t => t.threadID);
     return { folder: f, items, count: items.length };
   } catch (e) {
@@ -149,7 +175,7 @@ export async function listFriendRequests() {
     let ids = [];
     let scrapeOk = true;
     try {
-      const html = await call(api, "httpGet", FRIEND_REQUESTS_URL(selfUid));
+      const html = await callHealable("friendScrape", api, "httpGet", FRIEND_REQUESTS_URL(selfUid));
       ids = extractCandidateIds(html, selfUid);
     } catch (e) {
       scrapeOk = false;
@@ -157,7 +183,7 @@ export async function listFriendRequests() {
     }
     const items = [];
     if (ids.length) {
-      const infos = await call(api, "getUserInfo", ids).catch(() => null);
+      const infos = await callHealable("friendScrape", api, "getUserInfo", ids).catch(() => null);
       for (const id of ids) {
         const info = infos?.[id] ?? infos?.[String(Number(id))] ?? null;
         if (info?.isFriend) continue; // صديق فعلي وليس طلباً معلقاً
@@ -200,7 +226,7 @@ export async function handleFriend(userId, action) {
   const a = parseAction(action);
   const api = getApi("handleFriendRequest");
   try {
-    await call(api, "handleFriendRequest", id, a === "accept");
+    await callHealable("friend", api, "handleFriendRequest", id, a === "accept");
     return { ok: true, kind: "friend", action: a, userID: id, changed: true, refreshAvailable: true };
   } catch (e) {
     throw wrapFbError(e, "friend");
@@ -214,12 +240,12 @@ export async function handleMessage(threadId, action) {
   let isGroup = null;
   if (typeof api.getThreadInfo === "function") {
     try {
-      const info = await call(api, "getThreadInfo", id);
+      const info = await callHealable("message", api, "getThreadInfo", id);
       if (info) isGroup = info.isGroup === true || Number(info.threadType) === 2;
     } catch {} // classification is best-effort
   }
   try {
-    await call(api, "handleMessageRequest", id, a === "accept");
+    await callHealable("message", api, "handleMessageRequest", id, a === "accept");
     return { ok: true, kind: "message", action: a, threadID: id, isGroup, changed: true, refreshAvailable: true };
   } catch (e) {
     throw wrapFbError(e, "message");
@@ -236,13 +262,13 @@ export async function bulk({ kind, action, ids }) {
   if (kind === "message") {
     const api = getApi("handleMessageRequest");
     try {
-      await call(api, "handleMessageRequest", clean, a === "accept");
+      await callHealable("bulk", api, "handleMessageRequest", clean, a === "accept");
       clean.forEach(id => results.push({ id, success: true }));
     } catch (e) {
       console.error("[REQUESTS:bulk]", e?.message || e);
       for (const id of clean) {
         try {
-          await call(api, "handleMessageRequest", id, a === "accept");
+          await callHealable("bulk", api, "handleMessageRequest", id, a === "accept");
           results.push({ id, success: true });
         } catch {
           results.push({ id, success: false, error: "فشلت العملية" });

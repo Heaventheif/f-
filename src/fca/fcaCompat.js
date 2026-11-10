@@ -5,6 +5,53 @@
 
 const MAX_MSG_INDEX = 800;
 
+import { getLastKnownGoodAppState, normalizeAppState } from "./appStatePersist.js";
+
+// كوكيز الجلسة الحرجة التي يجب أن تبقى داخل jar الخاص بالـ api
+const CRITICAL_JAR_COOKIES = ["c_user", "xs", "i_user"];
+
+/**
+ * إصلاح ذاتي: إذا فقد jar الخاص بـ bun-fca كوكيز الجلسة (c_user/xs) —
+ * تُعاد حقنها من آخر حالة معروفة صالحة (الذاكرة/PostgreSQL) كي لا تفشل
+ * طلبات HTTP (getThreadList وغيرها) بخطأ 1357001 "Facebook blocked the login".
+ * تعيد قائمة أسماء الكوكيز التي تمت إعادتها.
+ */
+export function healSessionCookies(api) {
+  try {
+    const jar = api?.ctx?.jar;
+    if (!jar || typeof jar.setCookieSync !== "function") return [];
+    const current = typeof api.getAppState === "function" ? api.getAppState() : [];
+    const have = new Set((Array.isArray(current) ? current : []).map(c => String(c?.key ?? c?.name ?? "")));
+    const missing = CRITICAL_JAR_COOKIES.filter(k => !have.has(k));
+    if (!missing.length) return [];
+    const known = normalizeAppState(getLastKnownGoodAppState() || []);
+    if (!known.length) return [];
+    const healed = [];
+    for (const name of missing) {
+      const cookie = known.find(c => c.key === name);
+      if (!cookie || !cookie.value) continue;
+      try {
+        jar.setCookieSync({
+          key: cookie.key,
+          value: cookie.value,
+          domain: cookie.domain || ".facebook.com",
+          path: cookie.path || "/",
+          secure: cookie.secure !== false,
+          httpOnly: !!cookie.httpOnly,
+          expires: cookie.expires || "Infinity"
+        }, "https://www.facebook.com");
+        healed.push(name);
+      } catch (_) {}
+    }
+    if (healed.length) {
+      console.log(`[APPSTATE] 🔧 أُعيد حقن كوكيز الجلسة في jar: ${healed.join(", ")}`);
+    }
+    return healed;
+  } catch (_) {
+    return [];
+  }
+}
+
 function msgIndex() {
   global.__sunkenMsgThreadIndex ??= new Map();
   return global.__sunkenMsgThreadIndex;

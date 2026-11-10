@@ -292,24 +292,28 @@ async function setJarCookies(j, appstate) {
     const dom = cookieDomain.replace(/^\./, "");
 
     let expiresStr = "";
-    if (c.expirationDate !== undefined) {
-      let expiresDate;
-      if (typeof c.expirationDate === "number") {
-
-        const now = Date.now();
-        const oneYearInMs = 365 * 24 * 60 * 60 * 1000;
-        if (c.expirationDate < (now + oneYearInMs) / 1000) {
-          expiresDate = new Date(c.expirationDate * 1000);
-        } else {
-          expiresDate = new Date(c.expirationDate);
-        }
-      } else {
-        expiresDate = new Date(c.expirationDate);
+    const toExpiryDate = (raw) => {
+      // appstate exports use UNIX SECONDS (< 1e12) or milliseconds (>= 1e12) or ISO strings.
+      if (typeof raw === "number" || /^\d{9,14}$/.test(String(raw).trim())) {
+        const n = Number(String(raw).trim());
+        return new Date(n < 1e12 ? n * 1000 : n);
       }
-      expiresStr = `; expires=${expiresDate.toUTCString()}`;
-    } else if (c.expires) {
-      const expiresDate = typeof c.expires === "number" ? new Date(c.expires) : new Date(c.expires);
-      expiresStr = `; expires=${expiresDate.toUTCString()}`;
+      return new Date(raw);
+    };
+    if (c.expirationDate !== undefined && c.expirationDate !== null) {
+      try {
+        const expiresDate = toExpiryDate(c.expirationDate);
+        if (!isNaN(expiresDate.getTime())) expiresStr = `; expires=${expiresDate.toUTCString()}`;
+      } catch (_) { }
+    } else if (c.expires !== undefined && c.expires !== null) {
+      try {
+        if (c.expires === "Infinity" || c.expires === "infinity") {
+          expiresStr = "";
+        } else {
+          const expiresDate = toExpiryDate(c.expires);
+          if (!isNaN(expiresDate.getTime())) expiresStr = `; expires=${expiresDate.toUTCString()}`;
+        }
+      } catch (_) { }
     }
 
     const buildCookieString = (domainOverride = null) => {

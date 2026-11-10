@@ -16,9 +16,26 @@ function parseUrlSafe(url) {
   }
 }
 
+function normalizeTimestampMs(value) {
+  // Facebook appstate exports carry `expires`/`expirationDate` as UNIX SECONDS.
+  // Treating them as milliseconds yields 1970 dates => cookies considered expired
+  // => silently dropped from every request => FB answers 1357001 (login blocked).
+  const n = Number(value);
+  if (!Number.isFinite(n)) return NaN;
+  return n < 1e12 ? n * 1000 : n;
+}
+
 function parseExpires(value) {
   if (value === undefined || value === null) return null;
   if (value === "Infinity" || value === "infinity") return "Infinity";
+  if (typeof value === "number") {
+    const ms = normalizeTimestampMs(value);
+    return Number.isFinite(ms) && ms > 0 ? new Date(ms) : null;
+  }
+  if (typeof value === "string" && /^\d{9,14}$/.test(value.trim())) {
+    const ms = normalizeTimestampMs(value.trim());
+    return Number.isFinite(ms) && ms > 0 ? new Date(ms) : null;
+  }
   const t = Date.parse(value);
   if (Number.isNaN(t)) return null;
   return new Date(t);
@@ -88,7 +105,8 @@ function parseSetCookieString(str) {
 function domainMatch(host, cookieDomain) {
   if (!host || !cookieDomain) return false;
   host = host.toLowerCase();
-  cookieDomain = cookieDomain.toLowerCase();
+  cookieDomain = cookieDomain.toLowerCase().replace(/^\./, "");
+  if (!cookieDomain) return false;
   if (host === cookieDomain) return true;
   return host.endsWith("." + cookieDomain);
 }
@@ -120,7 +138,8 @@ class Cookie {
     this.creation = data.creation instanceof Date ? data.creation : new Date(data.creation || nowMs());
     this.lastAccessed = data.lastAccessed instanceof Date ? data.lastAccessed : new Date(data.lastAccessed || nowMs());
     const exp = data.expires === undefined ? "Infinity" : data.expires;
-    this.expires = exp === "Infinity" ? "Infinity" : exp instanceof Date ? exp : new Date(exp);
+    this.expires = parseExpires(exp);
+    if (this.expires === null) this.expires = "Infinity";
   }
 
   get name() {
@@ -208,8 +227,14 @@ class CookieJar {
         httpOnly: !!strOrCookie.httpOnly,
         sameSite: strOrCookie.sameSite || null
       };
-      if (attrs.expires && attrs.expires !== "Infinity" && typeof attrs.expires === "number") {
-        attrs.expires = new Date(attrs.expires);
+      if (attrs.expires && attrs.expires !== "Infinity") {
+        if (typeof attrs.expires === "number") {
+          const ms = normalizeTimestampMs(attrs.expires);
+          attrs.expires = Number.isFinite(ms) ? new Date(ms) : undefined;
+        } else if (typeof attrs.expires === "string" && /^\d{9,14}$/.test(attrs.expires.trim())) {
+          const ms = normalizeTimestampMs(attrs.expires.trim());
+          attrs.expires = Number.isFinite(ms) ? new Date(ms) : undefined;
+        }
       }
     } else {
       const parsed = parseSetCookieString(strOrCookie);
