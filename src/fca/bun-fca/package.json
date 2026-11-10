@@ -1,7 +1,7 @@
 {
   "name": "bun-fca",
   "version": "1.0.0",
-  "description": "Unified, hardened Facebook Messenger API (FCA) engine for Node.js & Bun — dual CJS/ESM, 2 runtime dependencies, session guard, broadcast, scheduler, page webhooks",
+  "description": "fca",
   "main": "index.js",
   "type": "commonjs",
   "exports": {
@@ -12,33 +12,7 @@
     },
     "./package.json": "./package.json"
   },
-  "files": [
-    "index.js",
-    "index.mjs",
-    "module/",
-    "func/",
-    "src/",
-    "examples/",
-    "README.md",
-    "README.AR.md",
-    "LICENSE"
-  ],
   "scripts": {},
-  "keywords": [
-    "fca",
-    "facebook",
-    "messenger",
-    "chat-api",
-    "bot",
-    "chatbot",
-    "bun",
-    "mqtt",
-    "websocket",
-    "unofficial",
-    "goatbot",
-    "mirai"
-  ],
-  "license": "MIT",
   "dependencies": {
     "mqtt": "^5.10.1",
     "ws": "^8.18.0"
