@@ -1,1 +1,114 @@
-"use strict";import fs from"../../utils/fsCompat.js";import{searchYoutube}from"../../utils/youtubeSearch.js";import{downloadYoutubeAudio,downloadYoutubeVideo}from"../../utils/yyApi.js";import{removeTempFile}from"../../utils/mediaFile.js";import{buildListText,attachReactionPicker}from"../../utils/reactionPicker.js";import{splitFile,cleanupParts,NEEDS_SPLIT}from"../../utils/mediaSplitter.js";const HELP="📥 يوتيوب دونلودر\n\n🎵 yt <اسم>          — تحميل مباشر لأقصر نتيجة (MP3)\n🎬 yt mp4 <اسم>      — تحميل مباشر (MP4)\n📋 yt s <اسم>        — قائمة نتائج (MP3)\n📋 yt s mp4 <اسم>    — قائمة نتائج (MP4)\n🔗 yt <رابط>         — تحميل مباشر\n\n🎚 الجودة: صوت 128kbps | فيديو 360p";async function search(query,limit=10){const result=await searchYoutube(query);if(!result?.status||!Array.isArray(result.results)){throw new Error("لا توجد نتائج من yt-search")}return result.results.slice(0,limit).map(item=>({url:item.url||(item.videoId?`https://www.youtube.com/watch?v=${item.videoId}`:null),title:item.title||item.name||"YouTube video",duration:item.duration?.seconds||item.seconds||item.duration||0,uploader:item.author?.name||item.author||item.channel?.name||item.channel||""})).filter(r=>r.url)}function pickShortest(list){const timed=list.filter(r=>Number(r.duration)>0);const pool=timed.length?timed:list;return pool.reduce((best,r)=>!best||(timed.length&&Number(r.duration)<Number(best.duration))?r:best,null)}async function downloadAndSend(api,threadID,messageID,ytUrl,wantMp4,listMsgId=null){let filePath=null;let partPaths=[];try{const media=wantMp4?await downloadYoutubeVideo(ytUrl,360):await downloadYoutubeAudio(ytUrl,"mp3");filePath=media.filePath;const{size}=await fs.stat(filePath);const files=NEEDS_SPLIT(size)?partPaths=await splitFile(filePath,wantMp4?"mp4":"mp3"):[filePath];for(const file of files)await global.mediaSendFile(api,file,threadID,messageID);if(listMsgId){try{await api.unsendMessage(listMsgId)}catch(_){}}}catch(_){console.error("[YT:ERR]",_?.message||_);global.safeSend(api,"❌ تعذّر تحميل الملف.",threadID,null,messageID)}finally{if(partPaths.length)await cleanupParts(partPaths);if(filePath)await removeTempFile(filePath)}}export default{config:{name:"yt",aliases:["يوتيوب"],version:"1.0.0",role:0,countDown:0,category:"وسائط وتحميل",description:"تحميل YouTube عبر yy (البحث عبر yt-search) — أضف s لعرض قائمة، وmp4 للفيديو",usage:["{pn}يوتيوب <اسم> — تحميل أول نتيجة مباشرة (MP3)","{pn}يوتيوب s <اسم> — عرض قائمة نتائج","{pn}يوتيوب mp4 <اسم> — تحميل أول نتيجة مباشرة (MP4)","{pn}يوتيوب s mp4 <اسم> — عرض قائمة نتائج (MP4)","{pn}يوتيوب <رابط> — تحميل مباشر MP3","{pn}يوتيوب mp4 <رابط> — تحميل مباشر MP4"]},onStart:async({api,message,args,event})=>{const{threadID,messageID}=event;if(!args[0])return message.reply(HELP);const rest=[...args];let showList=false,wantMp4=false;while(rest.length){const w=rest[0].toLowerCase();if(w==="s"&&!showList)showList=true;else if(w==="mp4"&&!wantMp4)wantMp4=true;else break;rest.shift()}const query=rest.join(" ").trim();if(!query)return message.reply("❌ أرسل اسم الأغنية أو الرابط.");if(/^https?:\/\//i.test(query)){return downloadAndSend(api,threadID,messageID,query,wantMp4)}try{if(!showList){const first=pickShortest(await search(query,10));if(!first?.url)throw new Error("no results");return await downloadAndSend(api,threadID,messageID,first.url,wantMp4)}const list=(await search(query,10)).slice(0,10);const sent=await new Promise((res,rej)=>global.safeSend(api,buildListText(list,wantMp4),threadID,(err,info)=>err?rej(err):res(info),messageID));attachReactionPicker({sentMessageID:sent?.messageID,authorID:event.senderID,list,threadID:event.threadID,commandName:"yt",onPick:(chosen,asMp4)=>downloadAndSend(api,threadID,messageID,chosen.url,asMp4,sent.messageID)})}catch(_){console.error("[YT:ERR]",_?.message||_);global.safeSend(api,"غير موجود.",threadID,null,messageID)}}};
+"use strict";
+import fs from "../../utils/fsCompat.js";
+import { searchYoutube } from "../../utils/youtubeSearch.js";
+import { downloadYoutubeAudio, downloadYoutubeVideo } from "../../utils/yyApi.js";
+import { removeTempFile } from "../../utils/mediaFile.js";
+import { buildListText, attachReactionPicker } from "../../utils/reactionPicker.js";
+import { splitFile, cleanupParts, NEEDS_SPLIT } from "../../utils/mediaSplitter.js";
+
+const HELP = "yt <اسم> | yt s <اسم> للقائمة | أضف mp4 للفيديو";
+
+function durationText(item) {
+  return item?.duration?.timestamp || item?.timestamp || item?.duration?.seconds || item?.seconds || item?.duration || "";
+}
+function authorText(item) {
+  return typeof item?.author === "string" ? item.author : item?.author?.name || item?.channel?.name || item?.channel || "";
+}
+async function search(query, limit = 10) {
+  const result = await searchYoutube(query);
+  if (!result?.status || !Array.isArray(result.results)) throw new Error("لا توجد نتائج");
+  const seen = new Set();
+  return result.results
+    .filter(item => item && (item.type == null || item.type === "video") && /^[\w-]{11}$/.test(String(item.videoId || "")))
+    .map(item => ({
+      videoId: String(item.videoId),
+      url: item.url || `https://www.youtube.com/watch?v=${item.videoId}`,
+      title: item.title || item.name || "YouTube video",
+      duration: durationText(item),
+      uploader: authorText(item),
+    }))
+    .filter(item => !seen.has(item.videoId) && seen.add(item.videoId))
+    .slice(0, Math.max(1, Math.min(10, limit)));
+}
+
+async function downloadAndSend(api, threadID, messageID, ytUrl, wantMp4, listMsgId = null) {
+  let filePath = null;
+  let partPaths = [];
+  try {
+    const media = wantMp4 ? await downloadYoutubeVideo(ytUrl, 360) : await downloadYoutubeAudio(ytUrl, "mp3");
+    filePath = media.filePath;
+    const { size } = await fs.stat(filePath);
+    const files = NEEDS_SPLIT(size) ? (partPaths = await splitFile(filePath, wantMp4 ? "mp4" : "mp3")) : [filePath];
+    for (const file of files) await global.mediaSendFile(api, file, threadID, messageID);
+    if (listMsgId) await api.unsendMessage(listMsgId).catch(() => {});
+  } catch (error) {
+    console.error("[YT:ERR]", error?.message || error);
+    await global.safeSend(api, "تعذّر تحميل الملف.", threadID, null, messageID).catch(() => {});
+  } finally {
+    if (partPaths.length) await cleanupParts(partPaths);
+    if (filePath) await removeTempFile(filePath);
+  }
+}
+
+function registerNumericReply(sent, event, list, threadID, messageID, api, commandName = "yt") {
+  if (!sent?.messageID || !global.Kagenou?.replies) return;
+  const sentID = String(sent.messageID);
+  global.Kagenou.replies[sentID] = {
+    author: event.senderID == null ? null : String(event.senderID),
+    threadID: String(threadID),
+    cmdKey: commandName,
+    timestamp: Date.now(),
+    callback: async ({ event: replyEvent }) => {
+      const text = String(replyEvent?.body || "").trim().toLowerCase();
+      const match = text.match(/^(?:(mp4)\s*)?(\d{1,2})$/);
+      if (!match) return;
+      const index = Number(match[2]) - 1;
+      if (index < 0 || index >= list.length) return;
+      await downloadAndSend(api, threadID, messageID, list[index].url, Boolean(match[1]), sent.messageID);
+    },
+  };
+}
+
+export default {
+  config: {
+    name: "yt", aliases: ["يوتيوب"], version: "1.1.0", role: 0, countDown: 0,
+    category: "وسائط وتحميل", description: "تحميل YouTube مع قائمة اختيار دقيقة",
+    usage: ["{pn}yt <اسم>", "{pn}yt s <اسم>", "{pn}yt mp4 <اسم>", "{pn}yt <رابط>"],
+  },
+  onStart: async ({ api, message, args, event }) => {
+    const { threadID, messageID } = event;
+    if (!args[0]) return message.reply(HELP);
+    const rest = [...args];
+    let showList = false;
+    let wantMp4 = false;
+    while (rest.length) {
+      const word = rest[0].toLowerCase();
+      if (word === "s" && !showList) showList = true;
+      else if (word === "mp4" && !wantMp4) wantMp4 = true;
+      else break;
+      rest.shift();
+    }
+    const query = rest.join(" ").trim();
+    if (!query) return message.reply(HELP);
+    if (/^https?:\/\//i.test(query)) return downloadAndSend(api, threadID, messageID, query, wantMp4);
+    try {
+      const list = await search(query, showList ? 10 : 1);
+      if (!showList) {
+        // yt-search already orders by relevance; never choose the shortest video.
+        return downloadAndSend(api, threadID, messageID, list[0].url, wantMp4);
+      }
+      const sent = await new Promise((resolve, reject) => {
+        global.safeSend(api, buildListText(list, wantMp4), threadID, (error, info) => error ? reject(error) : resolve(info), messageID);
+      });
+      registerNumericReply(sent, event, list, threadID, messageID, api);
+      attachReactionPicker({
+        sentMessageID: sent?.messageID, authorID: event.senderID, list, threadID,
+        commandName: "yt",
+        onPick: (chosen, asMp4) => downloadAndSend(api, threadID, messageID, chosen.url, asMp4, sent.messageID),
+      });
+    } catch (error) {
+      console.error("[YT:ERR]", error?.message || error);
+      await global.safeSend(api, "لم أجد نتائج مناسبة.", threadID, null, messageID).catch(() => {});
+    }
+  },
+};
