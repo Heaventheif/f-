@@ -1196,7 +1196,10 @@ function loginHelper(appState, Cookie, email, password, globalOptions, callback)
           api.sendMessage = fcanxSendMsg;
           api.sendMessageMqtt = require("../src/api/socket/sendMessageMqtt")(defaultFuncs, api, ctxMain);
           api.OldMessage = require("../src/api/socket/OldMessage")(defaultFuncs, api, ctxMain);
-          api.sendMessageDM = (msg, threadID, cb, replyTo) => api.OldMessage(msg, threadID, cb, replyTo, true);
+          // [مصحّح وفق donyst 2026-05] sendMessageDM كان يوجّه إلى OldMessage (/messaging/send/)
+          // الذي أزالته فيسبوك (404 دائماً). المحادثات الفردية تُرسل عبر MQTT مثل بقية الرسائل،
+          // وapi.sendMessage يكتشف نوع المحادثة ويستخدم جسر E2EE تلقائياً عند توفره.
+          api.sendMessageDM = (msg, threadID, cb, replyTo) => api.sendMessage(msg, threadID, cb, replyTo, true);
         } catch (e) {
           logger(`sendMessage override failed (non-fatal): ${e && e.message ? e.message : String(e)}`, "warn");
         }

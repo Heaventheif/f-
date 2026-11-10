@@ -113,7 +113,9 @@ function publishLsRequestWithAck(mqttClient, content, requestId, timeout) {
 }
 
 function waitForMqtt(ctx, maxMs) {
-    maxMs = maxMs || 4000;
+    // [مصحّح وفق donyst 2026-05] 12 ثانية بدل 4: نوافذ إعادة الاتصال القصيرة كانت
+    // تجعل sendViaMqtt ينسحب بسرعة ويرتد إلى /messaging/send/ الميت (404)
+    maxMs = maxMs || 12000;
     return new Promise(function (resolve) {
         var client = ctx.mqttClient || global.mqttClient;
         if (client && client.connected) return resolve(client);
@@ -141,7 +143,7 @@ module.exports = function (defaultFuncs, api, ctx) {
     }
 
     async function sendViaMqtt(msg, threadID, replyToMessage, ackTimeout) {
-        var mqttClient = await waitForMqtt(ctx, 4000);
+        var mqttClient = await waitForMqtt(ctx, 12000);
         if (!mqttClient || !mqttClient.connected) {
             throw new Error("MQTT client not available");
         }
@@ -277,7 +279,7 @@ module.exports = function (defaultFuncs, api, ctx) {
             if (!/timed out/i.test(msgErr)) throw firstErr;
             logger.warn("sendMessage", "MQTT ack timeout - one soft retry");
             await new Promise(function (r) { setTimeout(r, 800 + Math.floor(Math.random() * 700)); });
-            mqttClient = await waitForMqtt(ctx, 3000);
+            mqttClient = await waitForMqtt(ctx, 8000);
             if (!mqttClient || !mqttClient.connected) throw firstErr;
 
             requestId = Math.floor(100 + Math.random() * 900);
@@ -341,31 +343,22 @@ module.exports = function (defaultFuncs, api, ctx) {
 
         await waitTurn();
 
-        if (isSingleUser && msg.attachment) {
-            var useE2EE = api.e2ee && typeof api.e2ee.isConnected === "function" && api.e2ee.isConnected();
-            if (useE2EE) {
-                try {
-                    var e2eeResult = await api.e2ee.sendMessage(String(threadID), msg, replyToMessage || msg.replyToMessage);
-                    var wrapped = e2eeResult && e2eeResult.messageId
-                        ? { threadID: String(threadID), messageID: String(e2eeResult.messageId) }
-                        : e2eeResult;
-                    if (callback) callback(null, wrapped);
-                    else resolve(wrapped);
-                } catch (e2eeErr) {
-                    logger.error("sendMessage", "E2EE DM attachment send failed: " + (e2eeErr.message || e2eeErr));
-                    if (callback) callback(e2eeErr);
-                    else reject(e2eeErr);
-                }
-            } else {
-                try {
-                    var omResult = await sendViaOldMessage(msg, threadID, replyToMessage, isSingleUser);
-                    if (callback) callback(null, omResult);
-                    else resolve(omResult);
-                } catch (omErr) {
-                    logger.error("sendMessage", "DM attachment OldMessage failed: " + (omErr.message || omErr));
-                    if (callback) callback(omErr);
-                    else reject(omErr);
-                }
+        if (isSingleUser && msg.attachment && api.e2ee && typeof api.e2ee.isConnected === "function" && api.e2ee.isConnected()) {
+            // [مصحّح] المرفقات في محادثات E2EE المشفّرة فقط عبر الجسر؛ أما المحادثات العادية
+            // فترسل عبر MQTT مثل بقية الرسائل (المرجع donyst يرسل كل شيء عبر MQTT بلا استثناء).
+            // المسار القديم كان يرسل مرفقات المحادثات العادية إلى OldMessage (/messaging/send/)
+            // الذي أزالته فيسبوك → 404 دائم.
+            try {
+                var e2eeResult = await api.e2ee.sendMessage(String(threadID), msg, replyToMessage || msg.replyToMessage);
+                var wrapped = e2eeResult && e2eeResult.messageId
+                    ? { threadID: String(threadID), messageID: String(e2eeResult.messageId) }
+                    : e2eeResult;
+                if (callback) callback(null, wrapped);
+                else resolve(wrapped);
+            } catch (e2eeErr) {
+                logger.error("sendMessage", "E2EE DM attachment send failed: " + (e2eeErr.message || e2eeErr));
+                if (callback) callback(e2eeErr);
+                else reject(e2eeErr);
             }
             return promise;
         }
@@ -416,16 +409,15 @@ module.exports = function (defaultFuncs, api, ctx) {
             if (callback) callback(null, result);
             else resolve(result);
         } catch (mqttErr) {
-            logger.warn("sendMessage", "MQTT failed, falling back to OldMessage: " + (mqttErr.message || mqttErr));
-            try {
-                var fbResult = await sendViaOldMessage(msg, threadID, replyToMessage, isSingleUser);
-                if (callback) callback(null, fbResult);
-                else resolve(fbResult);
-            } catch (fbErr) {
-                logger.error("sendMessage", fbErr.error || fbErr.message || fbErr);
-                if (callback) callback(fbErr);
-                else reject(fbErr);
-            }
+            // [مصحّح وفق donyst 2026-05] لا ارتداد إلى OldMessage: نقطة النهاية
+            // /messaging/send/ أزالتها فيسبوك (404 دائماً) والارتداد إليها كان ينتج
+            // خطأ "Endpoint not found: 404" مضللاً بعد أن يكون الجرس الحقيقي هو MQTT.
+            // المرجع الأحدث يرسل عبر MQTT حصراً ويرفع خطأ واضحاً عند عدم توفره،
+            // وreconnect المجدول في listenMqtt يعيد الاستماع تلقائياً.
+            var mErr = mqttErr && mqttErr.message ? mqttErr.message : String(mqttErr);
+            logger.error("sendMessage", "فشل الإرسال عبر MQTT (المسار الوحيد الحي): " + mErr);
+            if (callback) callback(mqttErr);
+            else reject(mqttErr);
         }
 
         return promise;

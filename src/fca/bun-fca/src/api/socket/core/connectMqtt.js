@@ -7,7 +7,9 @@ const DEFAULT_RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_DELAY_MS = 60000;
 const MAX_RECONNECT_ATTEMPTS = 8
 const MAX_RECONNECT_COOLDOWN_MS = 15 * 60 * 1000  ;
-const T_MS_WAIT_TIMEOUT_MS = 5000;
+// [مصحّح وفق donyst 2026-05] انتظار أطول لرسالة /t_ms الأولى — الشبكات البطيئة (Render/مركز بيانات)
+// كانت تسبب reconnect ظالماً خلال 5 ثوانٍ
+const T_MS_WAIT_TIMEOUT_MS = 8000;
 
 function isImmediateReconnect(ctx) {
 
@@ -133,7 +135,8 @@ module.exports = function createListenMqtt(deps) {
       keepalive: 30,
       reschedulePings: true,
       reconnectPeriod: 0,
-      connectTimeout: 5000
+      // [مصحّح وفق donyst 2026-05] 12 ثانية بدل 5 — مصافحة TLS من مراكز البيانات تحتاج وقتاً أطول
+      connectTimeout: 12000
     };
     if (ctx.globalOptions.proxy !== undefined) {
       const agent = new HttpsProxyAgent(ctx.globalOptions.proxy);

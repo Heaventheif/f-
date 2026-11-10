@@ -30,9 +30,11 @@ const createEmitAuth = require("./core/emitAuth");
 const createMiddlewareSystem = require("./middleware");
 
 const _envCycleMs = parseInt(process.env.FCA_NX_MQTT_CYCLE_MS || "", 10);
-// [fcanew-r3nz75] التجديد الاستباقي كل ساعة: استبدال الاتصال باتصال نظيف
-// قبل أن يقتله خادم حافة فيسبوك بصمت دون حدث close
-const CYCLE_MS_DEFAULT = Number.isFinite(_envCycleMs) && _envCycleMs >= 0 ? _envCycleMs : 60 * 60 * 1000;
+// [مصحّح وفق fca-nx 6.8.0 Hardened5 وdonyst 2026-05] التجديد الاستباقي كل 6 ساعات بدل ساعة:
+// المقارنة أظهرت أن أحدث مرجع نشط (donyst) لا يجدد استباقياً إطلاقاً وfca-nx يجدد كل 6 ساعات،
+// بينما كانت نسختنا تقطع الاتصال عمداً كل ساعة (24 انقطاعاً/يوم) — وخلال نوافذ إعادة الاتصال
+// يظهر "توقف الاستماع" ويرتد الإرسال لمسار /messaging/send/ الميت (404).
+const CYCLE_MS_DEFAULT = Number.isFinite(_envCycleMs) && _envCycleMs >= 0 ? _envCycleMs : 6 * 60 * 60 * 1000;
 const RECONNECT_DELAY_MS_DEFAULT = 2000;
 const UNSUB_ALL_TIMEOUT_MS = 5000;
 const MAX_MQTT_RECONNECT_DELAY_MS = 60000;
