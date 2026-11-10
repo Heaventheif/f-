@@ -5,14 +5,10 @@ services:
     dockerfilePath: ./Dockerfile
     region: frankfurt
     plan: free
-    healthCheckPath: /ready
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: TRUST_PROXY
-        value: "1"
-      - key: READY_UNHEALTHY_GRACE_SEC
-        value: "180"
       - key: PORT
         value: "10000"
       - key: TMPDIR

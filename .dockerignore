@@ -11,8 +11,3 @@ temp
 Fca_Database
 botNames.json
 cmd-overrides.json
-.github
-*.md
-Dockerfile
-.dockerignore
-render.yaml
