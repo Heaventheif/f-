@@ -1,5 +1,5 @@
 "use strict";
-// Friend / message request management on top of fcanew (global.botApi)
+// إدارة طلبات المراسلة وطلبات الصداقة عبر مكتبة bun-fca المدمجة (global.botApi)
 
 export class RequestError extends Error {
   constructor(message, status = 500, code = "INTERNAL") {
@@ -17,13 +17,13 @@ function getApi(...methods) {
   if (!api) throw new RequestError("البوت غير متصل", 503, "BOT_OFFLINE");
   for (const m of methods) {
     if (typeof api[m] !== "function") {
-      throw new RequestError(`الواجهة ${m} غير مدعومة في نسخة المكتبة الحالية`, 501, "NOT_IMPLEMENTED");
+      throw new RequestError(`الواجهة ${m} غير مدعومة في مكتبة bun-fca`, 501, "NOT_IMPLEMENTED");
     }
   }
   return api;
 }
 
-// Supports fcanew's node callback and Promise forms, while settling only once.
+// يدعم نمط callback الخاص بـ bun-fca ونمط Promise معاً، مع تسوية واحدة فقط.
 function call(api, method, ...args) {
   return new Promise((resolve, reject) => {
     let done = false;
@@ -75,22 +75,6 @@ export function parseAction(v) {
 
 const str = (v, n = 200) => (v == null ? "" : String(v).slice(0, n));
 
-function normFriend(u) {
-  const id = str(u.userID ?? u.id, 30);
-  const isFriend = !!u.isFriend;
-  return {
-    userID: id,
-    name: str(u.fullName || u.name),
-    fullName: str(u.fullName || u.name),
-    isFriend,
-    // This is a candidate only. fcanew's getFriendsList is not a guaranteed
-    // pending-request endpoint, so callers must not treat it as authoritative.
-    isPendingCandidate: !isFriend,
-    profilePicture: str(u.profilePicture, 500),
-    profileUrl: str(u.profileUrl || (id ? `https://www.facebook.com/${id}` : ""), 500),
-  };
-}
-
 function normThread(t, folder) {
   const isGroup = t.isGroup === true || Number(t.threadType) === 2;
   return {
@@ -111,15 +95,15 @@ export async function listFriends() {
   const api = getApi("getFriendsList");
   try {
     const list = await call(api, "getFriendsList");
-    const items = (Array.isArray(list) ? list : []).map(normFriend).filter(f => f.userID);
-    const pendingCandidates = items.filter(f => f.isPendingCandidate);
-    return {
-      items,
-      count: items.length,
-      pendingCandidates,
-      pendingCandidateCount: pendingCandidates.length,
-      warning: "getFriendsList لا يضمن أنها قائمة طلبات الصداقة المعلقة؛ يجب التحقق من Adapter المكتبة قبل تنفيذ إجراء الصداقة.",
-    };
+    const items = (Array.isArray(list) ? list : []).map(u => ({
+      userID: str(u.userID ?? u.id, 30),
+      name: str(u.fullName || u.name),
+      fullName: str(u.fullName || u.name),
+      isFriend: !!u.isFriend,
+      profilePicture: str(u.profilePicture, 500),
+      profileUrl: str(u.profileUrl || (u.userID ? `https://www.facebook.com/${u.userID}` : ""), 500),
+    })).filter(f => f.userID);
+    return { items, count: items.length };
   } catch (e) {
     throw wrapFbError(e, "friends");
   }
@@ -138,42 +122,82 @@ export async function listMessages({ folder, limit } = {}) {
   }
 }
 
+// ---------- طلبات الصداقة المعلقة عبر bun-fca ----------
+
+const FRIEND_REQUESTS_URL = uid =>
+  `https://www.facebook.com/friends/requests/?viewer=${encodeURIComponent(uid)}`;
+
+function extractCandidateIds(html, selfUid) {
+  const ids = new Set();
+  const text = String(html || "");
+  const patterns = [
+    /profile\.php\?id=(\d{5,24})/g,
+    /"(?:USER_ID|USERID|user_id|userID)"\s*:\s*"?(\d{5,24})"?/g,
+    /"id"\s*:\s*"(\d{15,24})"/g,
+  ];
+  for (const re of patterns) {
+    for (const m of text.matchAll(re)) ids.add(m[1]);
+  }
+  ids.delete(String(selfUid ?? ""));
+  return [...ids].slice(0, LIMITS.maxLimit);
+}
+
+export async function listFriendRequests() {
+  const api = getApi("httpGet", "getCurrentUserID", "getUserInfo");
+  try {
+    const selfUid = await call(api, "getCurrentUserID");
+    let ids = [];
+    let scrapeOk = true;
+    try {
+      const html = await call(api, "httpGet", FRIEND_REQUESTS_URL(selfUid));
+      ids = extractCandidateIds(html, selfUid);
+    } catch (e) {
+      scrapeOk = false;
+      console.error("[REQUESTS:friendScrape]", e?.message || e);
+    }
+    const items = [];
+    if (ids.length) {
+      const infos = await call(api, "getUserInfo", ids).catch(() => null);
+      for (const id of ids) {
+        const info = infos?.[id] ?? infos?.[String(Number(id))] ?? null;
+        if (info?.isFriend) continue; // صديق فعلي وليس طلباً معلقاً
+        items.push({
+          userID: id,
+          name: str(info?.name) || `مستخدم ${id}`,
+          fullName: str(info?.name),
+          profilePicture: str(info?.thumbSrc, 500),
+          profileUrl: str(info?.profileUrl) || `https://www.facebook.com/${id}`,
+          isFriend: false,
+        });
+      }
+    }
+    return {
+      ok: true,
+      items,
+      count: items.length,
+      source: scrapeOk ? "friends-requests-page" : "unavailable",
+      warning: scrapeOk
+        ? "القائمة مستخرجة تقريبياً من صفحة طلبات الصداقة؛ إن ظهرت أسماء ناقصة استخدم إدخال ID يدوياً للقبول أو الرفض."
+        : "تعذر جلب صفحة طلبات الصداقة حالياً — استخدم إدخال ID يدوياً لتنفيذ القبول أو الرفض.",
+    };
+  } catch (e) {
+    throw wrapFbError(e, "friend-requests");
+  }
+}
+
 export async function listRequests({ kind = "all", folder, limit } = {}) {
   if (!["all", "friend", "message"].includes(kind)) {
     throw new RequestError("kind غير صالح", 400, "INVALID_KIND");
   }
   const out = { ok: true, fetchedAt: new Date().toISOString() };
-  if (kind === "all" || kind === "friend") out.friends = await listFriends();
+  if (kind === "all" || kind === "friend") out.friendRequests = await listFriendRequests();
   if (kind === "all" || kind === "message") out.messages = await listMessages({ folder, limit });
   return out;
-}
-
-function friendActionsEnabled() {
-  throw new RequestError(
-    "قبول/رفض الصداقة معطّل داخل الكود حتى إضافة Adapter موثوق لطلبات Facebook",
-    501,
-    "FRIEND_ACTIONS_NOT_IMPLEMENTED",
-  );
-}
-
-async function verifyFriendCandidate(id) {
-  // Prevent acting on a known existing friend. This is only a guard; the
-  // library still needs a verified pending-request adapter for production.
-  const current = await listFriends();
-  const candidate = current.pendingCandidates.find(item => item.userID === id);
-  if (!candidate) {
-    throw new RequestError(
-      "المستخدم غير موجود ضمن المرشحين الحاليين لطلبات الصداقة؛ حدّث القائمة أولاً",
-      409,
-      "FRIEND_REQUEST_NOT_FOUND",
-    );
-  }
 }
 
 export async function handleFriend(userId, action) {
   const id = validateId(userId, "userId");
   const a = parseAction(action);
-  friendActionsEnabled();
   const api = getApi("handleFriendRequest");
   try {
     await call(api, "handleFriendRequest", id, a === "accept");
@@ -208,7 +232,6 @@ export async function bulk({ kind, action, ids }) {
   if (!Array.isArray(ids) || !ids.length) throw new RequestError("ids مطلوبة", 400, "INVALID_IDS");
   if (ids.length > LIMITS.maxBulk) throw new RequestError(`الحد الأقصى ${LIMITS.maxBulk} عنصرًا`, 400, "TOO_MANY_IDS");
   const clean = [...new Set(ids.map(i => validateId(i)))];
-  if (kind === "friend") friendActionsEnabled();
   const results = [];
   if (kind === "message") {
     const api = getApi("handleMessageRequest");

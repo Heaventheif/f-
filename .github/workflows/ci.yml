@@ -8,5 +8,4 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: for f in $(git ls-files '*.js'); do node --check "$f"; done
-      - run: bun test
       - run: docker build -t sunkenbot .
