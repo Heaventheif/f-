@@ -29,8 +29,11 @@ const getTaskResponseData = require("./core/getTaskResponseData");
 const createEmitAuth = require("./core/emitAuth");
 const createMiddlewareSystem = require("./middleware");
 
-const CYCLE_MS_DEFAULT = 6 * 60 * 60 * 1000;
-const RECONNECT_DELAY_MS_DEFAULT = 8000;
+const _envCycleMs = parseInt(process.env.FCA_NX_MQTT_CYCLE_MS || "", 10);
+// [fcanew-r3nz75] التجديد الاستباقي كل ساعة: استبدال الاتصال باتصال نظيف
+// قبل أن يقتله خادم حافة فيسبوك بصمت دون حدث close
+const CYCLE_MS_DEFAULT = Number.isFinite(_envCycleMs) && _envCycleMs >= 0 ? _envCycleMs : 60 * 60 * 1000;
+const RECONNECT_DELAY_MS_DEFAULT = 2000;
 const UNSUB_ALL_TIMEOUT_MS = 5000;
 const MAX_MQTT_RECONNECT_DELAY_MS = 60000;
 const MAX_MQTT_RECONNECT_COOLDOWN_MS = 15 * 60 * 1000  ;
@@ -504,6 +507,20 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
     }
 
     return function (callback) {
+        // [fcanew-r3nz75] حارس الجلسة الواحدة: إذا كان هناك اتصال MQTT نشط،
+        // أعد استخدام جلسة الاستماع الحالية بدل فتح اتصال ثانٍ لنفس الحساب.
+        // اتصالان متزامنان يعالجان كل حدث مرتين ويبدوان كنشاط آلي مشبوه
+        // لفيسبوك — وهو سبب رئيسي لتوقف الاستماع على المدى الطويل.
+        if (ctx.mqttClient && !ctx._ending && !ctx._cycling && ctx._activeMsgEmitter) {
+            logger("listenMqtt() called while already listening - reusing existing session", "warn");
+            if (typeof callback === "function") {
+                ctx._originalCallback = callback;
+                globalCallback = middleware.count > 0 ? middleware.wrapCallback(callback) : callback;
+                ctx._globalCallbackWrapped = middleware.count > 0;
+            }
+            return ctx._activeMsgEmitter;
+        }
+
         class MessageEmitter extends EventEmitter {
             stopListening(callback2) {
                 const cb = callback2 || function () { };
@@ -527,6 +544,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
                 unsubAll(() => {
                     endQuietly(() => {
                         logger("mqtt stopped", "info");
+                        if (ctx._activeMsgEmitter === msgEmitter) ctx._activeMsgEmitter = null;
                         cb();
                         conf = mqttConf(ctx, conf);
                         if (conf.reconnectAfterStop) {
@@ -544,6 +562,7 @@ module.exports = function (defaultFuncs, api, ctx, opts) {
         }
 
         const msgEmitter = new MessageEmitter();
+        ctx._activeMsgEmitter = msgEmitter;
 
         ctx._originalCallback = callback || function (error, message) {
             if (error) {
