@@ -1,241 +1,240 @@
 "use strict";
-// Friend / message request management on top of fcanew (global.botApi)
+// Message-request management on top of fcanew (the bot api). Friend-request actions are
+// intentionally NOT implemented: the library exposes no verified pending-request adapter.
+import { AppError } from "../infra/errors.js";
+import { redactText } from "../fca/runtimeEnv.js";
 
-export class RequestError extends Error {
-  constructor(message, status = 500, code = "INTERNAL") {
-    super(message);
-    this.status = status;
-    this.code = code;
+export class RequestError extends AppError {
+  constructor(message, status = 500, code = "internal") {
+    super(code, message, { status });
   }
 }
 
 export const LIMITS = { maxLimit: 100, defaultLimit: 50, maxBulk: 25 };
 const FOLDERS = { PENDING: "PENDING", OTHER: "OTHER", INBOX: "INBOX" };
-
-function getApi(...methods) {
-  const api = global.botApi;
-  if (!api) throw new RequestError("البوت غير متصل", 503, "BOT_OFFLINE");
-  for (const m of methods) {
-    if (typeof api[m] !== "function") {
-      throw new RequestError(`الواجهة ${m} غير مدعومة في نسخة المكتبة الحالية`, 501, "NOT_IMPLEMENTED");
-    }
-  }
-  return api;
-}
-
-// Supports fcanew's node callback and Promise forms, while settling only once.
-function call(api, method, ...args) {
-  return new Promise((resolve, reject) => {
-    let done = false;
-    const cb = (err, res) => {
-      if (done) return;
-      done = true;
-      err ? reject(err) : resolve(res);
-    };
-    try {
-      const ret = api[method](...args, cb);
-      if (ret && typeof ret.then === "function") ret.then(r => cb(null, r), e => cb(e || new Error("failed")));
-    } catch (e) {
-      cb(e);
-    }
-  });
-}
-
-function wrapFbError(e, ctx) {
-  if (e instanceof RequestError) return e;
-  console.error(`[REQUESTS:${ctx}]`, e?.stack || e?.message || e);
-  return new RequestError("فشل الطلب من Facebook", 502, "UPSTREAM_ERROR");
-}
+const KINDS = { all: "all", message: "messages", messages: "messages", friend: "friends", friends: "friends" };
+const bad = (code, message) => new AppError(code, message, { status: 400 });
 
 export function validateId(id, label = "id") {
   const s = String(id ?? "");
-  if (!/^\d{5,24}$/.test(s)) throw new RequestError(`${label} غير صالح`, 400, "INVALID_ID");
+  if (!/^\d{5,24}$/.test(s)) throw bad("invalid_param", `${label} غير صالح`);
   return s;
 }
-
 export function parseLimit(v) {
   if (v === undefined || v === null || v === "") return LIMITS.defaultLimit;
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1 || n > LIMITS.maxLimit) {
-    throw new RequestError("limit يجب أن يكون بين 1 و100", 400, "INVALID_LIMIT");
-  }
+  if (!Number.isInteger(n) || n < 1 || n > LIMITS.maxLimit) throw bad("invalid_param", "limit يجب أن يكون بين 1 و100");
   return n;
 }
-
+export function parseCursor(v) {
+  if (v === undefined || v === null || v === "") return null;
+  if (!/^\d{1,16}$/.test(String(v))) throw bad("invalid_param", "cursor غير صالح");
+  return String(v);
+}
 export function parseFolder(v) {
   const f = FOLDERS[String(v ?? "PENDING").toUpperCase()];
-  if (!f) throw new RequestError("folder غير صالح (PENDING|OTHER|INBOX)", 400, "INVALID_FOLDER");
+  if (!f) throw bad("invalid_param", "folder غير صالح (PENDING|OTHER|INBOX)");
   return f;
 }
-
 export function parseAction(v) {
-  if (v !== "accept" && v !== "reject") throw new RequestError("action غير صالح", 400, "INVALID_ACTION");
+  if (v !== "accept" && v !== "reject") throw bad("invalid_param", "action غير صالح");
   return v;
+}
+export function parseKind(v) {
+  const k = KINDS[String(v ?? "messages")];
+  if (!k) throw bad("invalid_param", "kind غير صالح");
+  return k;
 }
 
 const str = (v, n = 200) => (v == null ? "" : String(v).slice(0, n));
+const safeText = (v, n = 200) => redactText(str(v, n));
 
 function normFriend(u) {
   const id = str(u.userID ?? u.id, 30);
   const isFriend = !!u.isFriend;
   return {
     userID: id,
-    name: str(u.fullName || u.name),
-    fullName: str(u.fullName || u.name),
+    name: safeText(u.fullName || u.name),
     isFriend,
-    // This is a candidate only. fcanew's getFriendsList is not a guaranteed
-    // pending-request endpoint, so callers must not treat it as authoritative.
-    isPendingCandidate: !isFriend,
-    profilePicture: str(u.profilePicture, 500),
+    isPendingCandidate: !isFriend, // candidate only; getFriendsList is not an authoritative pending list
     profileUrl: str(u.profileUrl || (id ? `https://www.facebook.com/${id}` : ""), 500),
   };
 }
-
 function normThread(t, folder) {
   const isGroup = t.isGroup === true || Number(t.threadType) === 2;
   return {
     threadID: str(t.threadID, 30),
-    name: str(t.name || t.threadName),
+    name: safeText(t.name || t.threadName),
     isGroup,
-    threadType: isGroup ? 2 : 1,
     folder,
     unreadCount: Number(t.unreadCount) || 0,
-    participants: (Array.isArray(t.participants) ? t.participants : [])
-      .slice(0, 50)
-      .map(p => ({ userID: str(p?.userID ?? p?.id ?? p, 30), name: str(p?.name ?? p?.fullName) })),
-    snippet: str(t.snippet, 200),
+    participantCount: Array.isArray(t.participants) ? t.participants.length : null,
+    snippet: safeText(t.snippet),
+    timestamp: t.timestamp != null ? String(t.timestamp) : null,
   };
 }
 
-export async function listFriends() {
-  const api = getApi("getFriendsList");
-  try {
-    const list = await call(api, "getFriendsList");
-    const items = (Array.isArray(list) ? list : []).map(normFriend).filter(f => f.userID);
-    const pendingCandidates = items.filter(f => f.isPendingCandidate);
-    return {
-      items,
-      count: items.length,
-      pendingCandidates,
-      pendingCandidateCount: pendingCandidates.length,
-      warning: "getFriendsList لا يضمن أنها قائمة طلبات الصداقة المعلقة؛ يجب التحقق من Adapter المكتبة قبل تنفيذ إجراء الصداقة.",
-    };
-  } catch (e) {
-    throw wrapFbError(e, "friends");
+export function createRequestService({
+  getBot = () => global.botApi,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  random = Math.random,
+  timeoutMs = 30_000,
+} = {}) {
+  function getApi(...methods) {
+    const api = getBot();
+    if (!api) throw new AppError("bot_offline", "البوت غير متصل");
+    for (const m of methods)
+      if (typeof api[m] !== "function") throw new AppError("not_implemented", `الواجهة ${m} غير مدعومة في نسخة المكتبة الحالية`);
+    return api;
   }
-}
 
-export async function listMessages({ folder, limit } = {}) {
-  const f = parseFolder(folder);
-  const l = parseLimit(limit);
-  const api = getApi("getThreadList");
-  try {
-    const list = await call(api, "getThreadList", l, null, [f]);
-    const items = (Array.isArray(list) ? list : []).map(t => normThread(t, f)).filter(t => t.threadID);
-    return { folder: f, items, count: items.length };
-  } catch (e) {
-    throw wrapFbError(e, "messages");
-  }
-}
-
-export async function listRequests({ kind = "all", folder, limit } = {}) {
-  if (!["all", "friend", "message"].includes(kind)) {
-    throw new RequestError("kind غير صالح", 400, "INVALID_KIND");
-  }
-  const out = { ok: true, fetchedAt: new Date().toISOString() };
-  if (kind === "all" || kind === "friend") out.friends = await listFriends();
-  if (kind === "all" || kind === "message") out.messages = await listMessages({ folder, limit });
-  return out;
-}
-
-function friendActionsEnabled() {
-  throw new RequestError(
-    "قبول/رفض الصداقة معطّل داخل الكود حتى إضافة Adapter موثوق لطلبات Facebook",
-    501,
-    "FRIEND_ACTIONS_NOT_IMPLEMENTED",
-  );
-}
-
-async function verifyFriendCandidate(id) {
-  // Prevent acting on a known existing friend. This is only a guard; the
-  // library still needs a verified pending-request adapter for production.
-  const current = await listFriends();
-  const candidate = current.pendingCandidates.find(item => item.userID === id);
-  if (!candidate) {
-    throw new RequestError(
-      "المستخدم غير موجود ضمن المرشحين الحاليين لطلبات الصداقة؛ حدّث القائمة أولاً",
-      409,
-      "FRIEND_REQUEST_NOT_FOUND",
-    );
-  }
-}
-
-export async function handleFriend(userId, action) {
-  const id = validateId(userId, "userId");
-  const a = parseAction(action);
-  friendActionsEnabled();
-  const api = getApi("handleFriendRequest");
-  try {
-    await call(api, "handleFriendRequest", id, a === "accept");
-    return { ok: true, kind: "friend", action: a, userID: id, changed: true, refreshAvailable: true };
-  } catch (e) {
-    throw wrapFbError(e, "friend");
-  }
-}
-
-export async function handleMessage(threadId, action) {
-  const id = validateId(threadId, "threadId");
-  const a = parseAction(action);
-  const api = getApi("handleMessageRequest");
-  let isGroup = null;
-  if (typeof api.getThreadInfo === "function") {
-    try {
-      const info = await call(api, "getThreadInfo", id);
-      if (info) isGroup = info.isGroup === true || Number(info.threadType) === 2;
-    } catch {} // classification is best-effort
-  }
-  try {
-    await call(api, "handleMessageRequest", id, a === "accept");
-    return { ok: true, kind: "message", action: a, threadID: id, isGroup, changed: true, refreshAvailable: true };
-  } catch (e) {
-    throw wrapFbError(e, "message");
-  }
-}
-
-export async function bulk({ kind, action, ids }) {
-  if (kind !== "friend" && kind !== "message") throw new RequestError("kind غير صالح", 400, "INVALID_KIND");
-  const a = parseAction(action);
-  if (!Array.isArray(ids) || !ids.length) throw new RequestError("ids مطلوبة", 400, "INVALID_IDS");
-  if (ids.length > LIMITS.maxBulk) throw new RequestError(`الحد الأقصى ${LIMITS.maxBulk} عنصرًا`, 400, "TOO_MANY_IDS");
-  const clean = [...new Set(ids.map(i => validateId(i)))];
-  if (kind === "friend") friendActionsEnabled();
-  const results = [];
-  if (kind === "message") {
-    const api = getApi("handleMessageRequest");
-    try {
-      await call(api, "handleMessageRequest", clean, a === "accept");
-      clean.forEach(id => results.push({ id, success: true }));
-    } catch (e) {
-      console.error("[REQUESTS:bulk]", e?.message || e);
-      for (const id of clean) {
-        try {
-          await call(api, "handleMessageRequest", id, a === "accept");
-          results.push({ id, success: true });
-        } catch {
-          results.push({ id, success: false, error: "فشلت العملية" });
-        }
-      }
-    }
-  } else {
-    for (const id of clean) {
+  // Supports node-callback and Promise forms, settles once, bounded by a timeout.
+  function call(api, method, ...args) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const timer = setTimeout(() => cb(new AppError("timeout", "انتهت مهلة Facebook", { retryable: true })), timeoutMs);
+      const cb = (err, res) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        err ? reject(err) : resolve(res);
+      };
       try {
-        await handleFriend(id, a);
-        results.push({ id, success: true });
-      } catch (err) {
-        results.push({ id, success: false, error: String(err.message).slice(0, 120) });
+        const ret = api[method](...args, cb);
+        if (ret && typeof ret.then === "function") ret.then((r) => cb(null, r), (e) => cb(e || new Error("failed")));
+      } catch (e) {
+        cb(e);
       }
+    });
+  }
+  function wrap(e, ctx) {
+    if (e instanceof AppError) return e;
+    console.error(`[REQUESTS:${ctx}]`, redactText(e?.stack || e?.message || e));
+    return new AppError("upstream", "فشل الطلب من Facebook");
+  }
+
+  async function listFriends() {
+    const api = getApi("getFriendsList");
+    try {
+      const list = await call(api, "getFriendsList");
+      const items = (Array.isArray(list) ? list : []).map(normFriend).filter((f) => f.userID);
+      const pendingCandidates = items.filter((f) => f.isPendingCandidate);
+      return {
+        items,
+        count: items.length,
+        pendingCandidates,
+        pendingCandidateCount: pendingCandidates.length,
+        warning: "getFriendsList لا يضمن أنها قائمة طلبات الصداقة المعلقة؛ إجراءات الصداقة معطّلة.",
+      };
+    } catch (e) {
+      throw wrap(e, "friends");
     }
   }
-  const succeeded = results.filter(r => r.success).length;
-  return { ok: true, kind, action: a, requested: clean.length, succeeded, failed: clean.length - succeeded, results };
+
+  async function listMessages({ folder, limit, cursor } = {}) {
+    const f = parseFolder(folder);
+    const l = parseLimit(limit);
+    const c = parseCursor(cursor);
+    const api = getApi("getThreadList");
+    try {
+      const list = await call(api, "getThreadList", l, c, [f]);
+      const items = (Array.isArray(list) ? list : []).map((t) => normThread(t, f)).filter((t) => t.threadID);
+      const last = items[items.length - 1];
+      return {
+        folder: f,
+        items,
+        count: items.length,
+        limit: l,
+        nextCursor: items.length >= l && last?.timestamp ? last.timestamp : null,
+      };
+    } catch (e) {
+      throw wrap(e, "messages");
+    }
+  }
+
+  async function listRequests({ kind, folder, limit, cursor } = {}) {
+    const k = parseKind(kind);
+    const out = { fetchedAt: new Date().toISOString() };
+    if (k === "all" || k === "messages") out.messages = await listMessages({ folder, limit, cursor });
+    if (k === "all" || k === "friends") out.friends = await listFriends();
+    return out;
+  }
+
+  // Which of `ids` currently sit in PENDING/OTHER (bounded paging). Acting on anything else is refused.
+  async function findPending(ids) {
+    const want = new Set(ids);
+    const found = new Set();
+    const api = getApi("getThreadList");
+    for (const folder of ["PENDING", "OTHER"]) {
+      let cursor = null;
+      for (let page = 0; page < 5 && found.size < want.size; page++) {
+        let list;
+        try {
+          list = await call(api, "getThreadList", LIMITS.maxLimit, cursor, [folder]);
+        } catch (e) {
+          throw wrap(e, "verify");
+        }
+        list = Array.isArray(list) ? list : [];
+        for (const t of list) if (want.has(String(t.threadID))) found.add(String(t.threadID));
+        const ts = list.length ? list[list.length - 1]?.timestamp : null;
+        if (list.length < LIMITS.maxLimit || ts == null) break;
+        cursor = String(ts);
+      }
+      if (found.size === want.size) break;
+    }
+    return found;
+  }
+
+  async function actOne(api, id, action) {
+    try {
+      await call(api, "handleMessageRequest", id, action === "accept");
+    } catch (e) {
+      throw wrap(e, "message");
+    }
+  }
+
+  async function handleMessage(threadId, action) {
+    const id = validateId(threadId, "threadId");
+    const a = parseAction(action);
+    const api = getApi("handleMessageRequest", "getThreadList");
+    const found = await findPending([id]);
+    if (!found.has(id)) throw new AppError("conflict", "الطلب غير موجود ضمن الطلبات المعلقة؛ حدّث القائمة", { status: 409 });
+    await actOne(api, id, a);
+    return { kind: "message", action: a, threadID: id, changed: true };
+  }
+
+  async function bulk({ kind, action, ids } = {}) {
+    const k = parseKind(kind);
+    if (k === "friends") throw new AppError("not_implemented", "إجراءات الصداقة معطّلة");
+    if (k !== "messages") throw bad("invalid_param", "kind غير صالح");
+    const a = parseAction(action);
+    if (!Array.isArray(ids) || !ids.length) throw bad("invalid_param", "ids مطلوبة");
+    if (ids.length > LIMITS.maxBulk) throw bad("invalid_param", `الحد الأقصى ${LIMITS.maxBulk} عنصرًا`);
+    const clean = [...new Set(ids.map((i) => validateId(i)))];
+    const api = getApi("handleMessageRequest", "getThreadList");
+    const found = await findPending(clean);
+    const results = [];
+    let first = true;
+    for (const id of clean) {
+      if (!found.has(id)) {
+        results.push({ id, success: false, error: "الطلب غير موجود ضمن الطلبات المعلقة" });
+        continue;
+      }
+      if (!first) await sleep(150 + Math.floor(random() * 350)); // jitter between actions
+      first = false;
+      try {
+        await actOne(api, id, a); // each id attempted exactly once: no retry of succeeded ids
+        results.push({ id, success: true });
+      } catch (e) {
+        results.push({ id, success: false, error: redactText(String(e?.message || "فشلت العملية")).slice(0, 120) });
+      }
+    }
+    const succeeded = results.filter((r) => r.success).length;
+    return {
+      ok: succeeded > 0,
+      data: { kind: "message", action: a, requested: clean.length, succeeded, failed: clean.length - succeeded, results },
+    };
+  }
+
+  return { listFriends, listMessages, listRequests, handleMessage, bulk };
 }

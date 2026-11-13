@@ -1,1 +1,3 @@
-"use strict";import group from"./_modules/group.js";import user from"./_modules/user.js";import ban from"./_modules/ban.js";export const commands=[group,user,ban];
+"use strict";
+import { discoverCommands } from "../core/Loader.js";
+export const commands = await discoverCommands(import.meta.url, ["group", "user", "ban"]);

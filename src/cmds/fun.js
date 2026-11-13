@@ -1,1 +1,3 @@
-"use strict";import animal from"./_modules/animal.js";import chess from"./_modules/chess.js";export const commands=[animal,chess];
+"use strict";
+import { discoverCommands } from "../core/Loader.js";
+export const commands = await discoverCommands(import.meta.url, ["animal", "chess"]);

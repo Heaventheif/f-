@@ -1,2 +1,76 @@
-"use strict";import{readFile,mkdir,writeFile,rename}from"node:fs/promises";import path from"node:path";import{ensurePostgresSchema}from"./postgres.js";const BANS_FILE=process.env.BANS_FILE||path.join(process.env.STATE_DIR||path.resolve(process.cwd(),"data"),"bans.json");const SETS={user:"_bannedUsers",group:"_bannedGroups"};function applyRow(kind,id,banned){const set=global[SETS[kind]];if(!set||!id)return;if(banned)set.add(String(id));else set.delete(String(id))}let _rowsCache=null;async function readFileRows(){if(_rowsCache)return _rowsCache;try{const raw=JSON.parse(await readFile(BANS_FILE,"utf8"));const rows=Array.isArray(raw?.rows)?raw.rows:[];_rowsCache=rows;return rows}catch{return[]}}let _writeChain=Promise.resolve();function writeFileRow(kind,id,banned,actor){const run=_writeChain.then(()=>_writeFileRowImpl(kind,id,banned,actor));_writeChain=run.catch(()=>{});return run}async function _writeFileRowImpl(kind,id,banned,actor){const rows=(await readFileRows()).filter(r=>!(r.kind===kind&&r.id===id));rows.push({kind,id,banned,actor:actor??null,at:new Date().toISOString()});const tmp=`${BANS_FILE}.${process.pid}.tmp`;await mkdir(path.dirname(BANS_FILE),{recursive:true});await writeFile(tmp,JSON.stringify({rows},null,2),"utf8");await rename(tmp,BANS_FILE);_rowsCache=rows}export async function loadBans(){let rows=null;try{const db=await ensurePostgresSchema();if(db)rows=(await db.query("SELECT kind, id, banned FROM sunkenbot_bans")).rows}catch(e){console.warn("[BANS] تعذر القراءة من PostgreSQL:",e?.code||e?.message||e)}if(!rows)rows=await readFileRows();for(const r of rows)if(SETS[r.kind])applyRow(r.kind,r.id,!!r.banned);console.log(`[BANS] ✅ استُعيد ${rows.length} سجل حظر | مستخدمون: ${global._bannedUsers?.size??0} | مجموعات: ${global._bannedGroups?.size??0}`)}export async function persistBanChange(kind,id,banned,actor){if(!SETS[kind]||!id)return false;const key=String(id);const who=actor==null?null:String(actor);try{const db=await ensurePostgresSchema();if(db){await db.query(`INSERT INTO sunkenbot_bans (kind, id, banned, actor, updated_at) VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (kind, id) DO UPDATE SET banned = EXCLUDED.banned, actor = EXCLUDED.actor, updated_at = NOW()`,[kind,key,banned,who]);return true}}catch(e){console.warn("[BANS] تعذر الحفظ في PostgreSQL، سيُستخدم الملف المحلي:",e?.code||e?.message||e)}try{await writeFileRow(kind,key,banned,who);return true}catch(e){console.error("[BANS] ⚠️ لم يُحفظ الحظر (يبقى في الذاكرة فقط):",e?.message||e);return false}}
+"use strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { getStore } from "../state/kv.js";
+import { AppError } from "../infra/errors.js";
+import { ensurePostgresSchema } from "./postgres.js";
+
+const LEGACY_FILE =
+  process.env.BANS_FILE ||
+  path.join(process.env.STATE_DIR || path.resolve(process.cwd(), "data"), "bans.json");
+const SETS = { user: "_bannedUsers", group: "_bannedGroups" };
+let _ns = null;
+// Test hook: inject a fake kv namespace.
+export function _useNamespace(ns) {
+  _ns = ns;
+}
+async function ns() {
+  return (_ns ??= (await getStore()).ns("bans"));
+}
+function applyRow(kind, id, banned) {
+  const set = global[SETS[kind]];
+  if (!set || !id) return;
+  if (banned) set.add(String(id));
+  else set.delete(String(id));
+}
+async function legacyRows() {
+  try {
+    const db = await ensurePostgresSchema();
+    if (db) return (await db.query("SELECT kind, id, banned, actor FROM sunkenbot_bans")).rows;
+  } catch {}
+  try {
+    const raw = JSON.parse(await readFile(LEGACY_FILE, "utf8"));
+    return Array.isArray(raw?.rows) ? raw.rows : [];
+  } catch {
+    return [];
+  }
+}
+export async function loadBans() {
+  const store = await ns();
+  let entries = await store.list();
+  if (entries.length === 0) {
+    // One-time import of pre-kv ban rows.
+    for (const r of await legacyRows()) {
+      if (SETS[r.kind] && r.id)
+        await store.set(`${r.kind}:${r.id}`, { banned: !!r.banned, actor: r.actor ?? null });
+    }
+    entries = await store.list();
+  }
+  for (const [key, v] of entries) {
+    const i = key.indexOf(":");
+    applyRow(key.slice(0, i), key.slice(i + 1), !!v?.banned);
+  }
+  console.log(
+    `[BANS] ✅ استُعيد ${entries.length} سجل حظر | مستخدمون: ${global._bannedUsers?.size ?? 0} | مجموعات: ${global._bannedGroups?.size ?? 0}`,
+  );
+}
+// Durable write; THROWS on failure so callers never change memory alone.
+export async function persistBanChange(kind, id, banned, actor) {
+  if (!SETS[kind] || !id) throw new AppError("bad_args", "invalid ban target");
+  try {
+    await (await ns()).set(`${kind}:${String(id)}`, {
+      banned: !!banned,
+      actor: actor == null ? null : String(actor),
+      at: new Date().toISOString(),
+    });
+    return true;
+  } catch (e) {
+    throw new AppError("state_failed", "ban not persisted", { cause: e });
+  }
+}
+// Persist first, then update the in-memory set.
+export async function setBan(kind, id, banned, actor) {
+  await persistBanChange(kind, id, banned, actor);
+  applyRow(kind, id, !!banned);
+  return true;
+}

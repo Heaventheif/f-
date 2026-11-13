@@ -1,1 +1,91 @@
-"use strict";import fs from"./fsCompat.js";import os from"os";import path from"path";import{execFile}from"child_process";const MAX_PART_BYTES=24*1024*1024;const TARGET_PART_BYTES=Math.floor(MAX_PART_BYTES*.85);const MAX_SPLIT_ATTEMPTS=3;function NEEDS_SPLIT(sizeBytes){return sizeBytes>MAX_PART_BYTES}function runFfprobe(filePath){return new Promise((resolve,reject)=>{execFile("ffprobe",["-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",filePath],{timeout:3e4},(err,stdout)=>{if(err)return reject(err);const duration=parseFloat(String(stdout).trim());if(!duration||!isFinite(duration)||duration<=0){return reject(new Error("تعذّر قراءة مدة الملف عبر ffprobe"))}resolve(duration)})})}function runFfmpegSegment(filePath,ext,segmentSeconds,outDir){const pattern=path.join(outDir,`part_%03d.${ext}`);return new Promise((resolve,reject)=>{execFile("ffmpeg",["-y","-i",filePath,"-c","copy","-map","0","-f","segment","-segment_time",String(Math.max(1,Math.floor(segmentSeconds))),"-reset_timestamps","1",pattern],{timeout:10*60*1e3,maxBuffer:1024*1024*10},(err,_stdout,stderr)=>{if(err)return reject(new Error(`ffmpeg فشل: ${stderr?.toString().slice(-300)||err.message}`));resolve()})})}async function segmentOnce(filePath,ext,size,workDir){const duration=await runFfprobe(filePath);const bytesPerSecond=size/duration;const segmentSeconds=Math.max(1,TARGET_PART_BYTES/bytesPerSecond);await runFfmpegSegment(filePath,ext,segmentSeconds,workDir);const files=(await fs.readdir(workDir)).filter(f=>f.startsWith("part_")).sort().map(f=>path.join(workDir,f));if(files.length===0)throw new Error("ffmpeg لم ينتج أي أجزاء");return files}async function splitFile(filePath,ext="mp4"){const workDir=await fs.mkdtemp(path.join(os.tmpdir(),"split_"));let parts=[];try{parts=await segmentOnce(filePath,ext,(await fs.stat(filePath)).size,workDir);for(let attempt=0;attempt<MAX_SPLIT_ATTEMPTS;attempt++){const oversized=[];for(const p of parts){const st=await fs.stat(p);if(st.size>MAX_PART_BYTES)oversized.push(p)}if(oversized.length===0)break;for(const p of oversized){const subDir=await fs.mkdtemp(path.join(os.tmpdir(),"resplit_"));try{const st=await fs.stat(p);const subParts=await segmentOnce(p,ext,st.size,subDir);const finalSubParts=[];for(const sp of subParts){const dest=path.join(workDir,`${path.basename(p,path.extname(p))}_${path.basename(sp)}`);await fs.move(sp,dest,{overwrite:true});finalSubParts.push(dest)}const idx=parts.indexOf(p);parts.splice(idx,1,...finalSubParts);await fs.remove(p).catch(()=>{})}finally{await fs.remove(subDir).catch(()=>{})}}}if(parts.length===0){const err=new Error("تعذّر تقسيم الملف إلى أجزاء صالحة.");err.code="FILE_TOO_LARGE";throw err}return parts}catch(e){await fs.remove(workDir).catch(()=>{});if(e.code==="FILE_TOO_LARGE")throw e;const err=new Error(`تعذّر تقسيم الملف: ${e.message}`);err.code="FILE_TOO_LARGE";throw err}}async function cleanupParts(partPaths){await Promise.allSettled((partPaths||[]).map(p=>fs.remove(p)));const dirs=new Set((partPaths||[]).map(p=>path.dirname(p)));await Promise.allSettled([...dirs].map(d=>fs.remove(d)))}export{splitFile,cleanupParts,NEEDS_SPLIT,MAX_PART_BYTES};
+"use strict";
+import fs from "./fsCompat.js";
+import path from "path";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { execFile } from "child_process";
+import { tmpRoot } from "../io/tmp.js";
+import { AppError } from "../infra/errors.js";
+import { safeExt } from "./mediaFile.js";
+
+const MAX_PART_BYTES = 24 * 1024 * 1024;
+const TARGET_RATIO = 0.85;
+const MAX_ATTEMPTS = 4; // attempt 0 = stream copy, the rest re-encode with shrinking segments
+const AUDIO_ENCODERS = { mp3: "libmp3lame", ogg: "libvorbis", opus: "libopus" };
+const AUDIO_EXTS = new Set(["mp3", "m4a", "ogg", "opus", "wav", "aac", "amr"]);
+
+function NEEDS_SPLIT(sizeBytes, max = MAX_PART_BYTES) {
+  return sizeBytes > max;
+}
+
+// Pure: segment length (seconds) so an average part lands at ~85% of the cap; `shrink` tightens it on retries.
+export function planSegmentSeconds(size, durationSec, maxPart = MAX_PART_BYTES, shrink = 1) {
+  const bytesPerSecond = size / durationSec;
+  return Math.max(1, Math.floor((maxPart * TARGET_RATIO * shrink) / bytesPerSecond));
+}
+export const findOversize = (entries, max = MAX_PART_BYTES) => entries.filter((e) => e.size > max);
+
+// Pure: ffmpeg args. Maps only video+audio (data/subtitle streams break segmenting).
+export function buildSegmentArgs(input, pattern, ext, seconds, { reencode = false } = {}) {
+  const args = ["-y", "-i", input, "-map", "0:v?", "-map", "0:a?"];
+  if (!reencode) args.push("-c", "copy");
+  else if (AUDIO_EXTS.has(ext)) args.push("-vn", "-c:a", AUDIO_ENCODERS[ext] || "aac", "-b:a", "96k");
+  else
+    args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-c:a", "aac", "-b:a", "96k",
+      "-force_key_frames", `expr:gte(t,n_forced*${seconds})`);
+  args.push("-f", "segment", "-segment_time", String(seconds), "-reset_timestamps", "1", pattern);
+  return args;
+}
+
+function run(cmd, args, timeout, maxBuffer = 1024 * 1024 * 10) {
+  return new Promise((resolve, reject) =>
+    execFile(cmd, args, { timeout, maxBuffer }, (err, stdout, stderr) =>
+      err ? reject(new AppError("upstream", `${cmd} failed: ${String(stderr || err.message).slice(-300)}`, { cause: err })) : resolve(String(stdout))));
+}
+async function probeDuration(filePath) {
+  const out = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath], 30_000);
+  const duration = parseFloat(out.trim());
+  if (!duration || !isFinite(duration) || duration <= 0) throw new AppError("upstream", "ffprobe_no_duration");
+  return duration;
+}
+async function listParts(workDir) {
+  const names = (await fs.readdir(workDir)).filter((f) => f.startsWith("part_")).sort();
+  return Promise.all(names.map(async (n) => { const p = path.join(workDir, n); return { path: p, size: (await fs.stat(p)).size }; }));
+}
+async function makeWorkDir(dir) {
+  if (dir) { const d = path.join(dir, `split-${randomUUID()}`); await mkdir(d, { recursive: true }); return d; }
+  return mkdtemp(path.join(await tmpRoot(), "split-"));
+}
+
+/**
+ * Split into parts <= maxPart. Pass `dir` (from withTempDir) so cleanup is automatic;
+ * otherwise a private dir is created and cleanupParts() must be called.
+ * Throws AppError("too_large") when no attempt gets every part under the cap.
+ */
+async function splitFile(filePath, extension = "mp4", { dir, maxPart = MAX_PART_BYTES } = {}) {
+  const ext = safeExt(extension, "mp4");
+  const size = (await fs.stat(filePath)).size;
+  const duration = await probeDuration(filePath);
+  const workDir = await makeWorkDir(dir);
+  try {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      for (const f of await fs.readdir(workDir)) await fs.remove(path.join(workDir, f));
+      const reencode = attempt > 0;
+      const seconds = planSegmentSeconds(size, duration, maxPart, reencode ? 0.6 ** (attempt - 1) : 1);
+      await run("ffmpeg", buildSegmentArgs(filePath, path.join(workDir, `part_%03d.${ext}`), ext, seconds, { reencode }), 10 * 60_000);
+      const parts = await listParts(workDir);
+      if (parts.length && !parts.some((p) => p.size === 0) && findOversize(parts, maxPart).length === 0) return parts.map((p) => p.path);
+      // a segment can only be shorter than one keyframe interval; if copy cannot shrink it, re-encode next round
+    }
+    throw new AppError("too_large", "split_still_oversize");
+  } catch (e) {
+    await fs.remove(workDir).catch(() => {});
+    if (e instanceof AppError) throw e;
+    throw new AppError("too_large", `split_failed: ${e.message}`, { cause: e });
+  }
+}
+async function cleanupParts(partPaths) {
+  const dirs = new Set((partPaths || []).map((p) => path.dirname(p)));
+  await Promise.allSettled([...dirs].map((d) => fs.remove(d)));
+}
+export { splitFile, cleanupParts, NEEDS_SPLIT, MAX_PART_BYTES };

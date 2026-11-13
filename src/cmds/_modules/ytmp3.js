@@ -1,1 +1,59 @@
-"use strict";import{searchYoutube}from"../../utils/youtubeSearch.js";import{rm}from"node:fs/promises";import{getApiUrl,downloadYoutubeAudio}from"../../utils/yyApi.js";export{getApiUrl};export async function downloadAudio(sourceUrl,format="mp3"){const media=await downloadYoutubeAudio(sourceUrl,format);return media.filePath}function getDurationSeconds(item){if(Number.isFinite(item?.seconds))return item.seconds;const timestamp=item?.timestamp||item?.duration?.timestamp;if(typeof timestamp!=="string")return null;const parts=timestamp.split(":").map(Number);if(!parts.length||parts.some(part=>!Number.isFinite(part)))return null;return parts.reduce((total,part)=>total*60+part,0)}export function normalizeSearchResults(result,limit=1){if(!result?.status||!Array.isArray(result.results)){throw new Error(result?.message||"yt_search_failed")}const maxResults=Number.isFinite(Number(limit))?Math.max(0,Math.floor(Number(limit))):1;const items=result.results.filter(item=>item&&(item.type==null||item.type==="video")&&/^[\w-]{11}$/.test(String(item.videoId||""))).slice(0,maxResults).map(item=>{const artist=typeof item.author==="string"?item.author:item.author?.name||"";return{id:item.videoId,videoId:item.videoId,title:item.title||"",artist,artists:artist,duration:getDurationSeconds(item),thumbnail:item.thumbnail||item.image||item.thumbnails?.[0]?.url||null,url:item.url||`https://www.youtube.com/watch?v=${item.videoId}`}});if(!items.length)throw new Error("no_results");return items}export async function search(query,limit=1){const text=String(query||"").trim();if(!text)throw new Error("no_results");const result=await searchYoutube(text);return normalizeSearchResults(result,limit)}export async function download(videoId){if(!/^[\w-]{11}$/.test(String(videoId||""))){throw new Error("معرّف فيديو غير صالح")}const media=await downloadYoutubeAudio(`https://music.youtube.com/watch?v=${videoId}`,"m4a");return media.filePath}export default{config:{name:"ytmp3",version:"1.0.0",role:0,countDown:4,category:"وسائط وتحميل",description:"تحميل صوت MP3 من YouTube أو رابط صوتي عبر yy",usage:["{pn}ytmp3 <اسم الأغنية> — البحث وتنزيل أول نتيجة كـMP3","{pn}ytmp3 <رابط YouTube أو SoundCloud> — تنزيل الصوت"]},onStart:async({api,message,args,event})=>{const query=(args||[]).join(" ").trim();if(!query)return message.reply("الاستخدام: ytmp3 <اسم الأغنية أو رابط YouTube/SoundCloud>");let filePath=null;try{getApiUrl();let sourceUrl=query;if(!/^https?:\/\//i.test(query)){const[first]=await search(query,1);if(!first?.videoId)throw new Error("لم أجد نتيجة بحث.");sourceUrl=`https://www.youtube.com/watch?v=${first.videoId}`}filePath=await downloadAudio(sourceUrl,"mp3");await global.mediaSendFile(api,filePath,event.threadID,event.messageID)}catch(error){console.error("[ytmp3]",error?.message||error);await message.reply(`❌ تعذّر تنزيل الصوت: ${String(error?.message||"خطأ غير معروف").slice(0,220)}`)}finally{if(filePath)await rm(filePath,{force:true}).catch(()=>{})}}};
+"use strict";
+import { withTempDir } from "../../io/tmp.js";
+import { getApiUrl } from "../../utils/yyApi.js";
+import {
+  normalizeYtResults, searchYt, fetchAudioFile, ytMusicUrl, assertDuration, audioErrorText,
+  isAllowedAudioUrl,
+} from "../../media/audioSource.js";
+import { reply } from "../../media/common.js";
+
+export { getApiUrl };
+export const normalizeSearchResults = normalizeYtResults;
+export const search = searchYt;
+export const downloadAudio = (sourceUrl, format = "mp3", opts = {}) => fetchAudioFile(sourceUrl, { ...opts, format });
+export const download = (videoId, opts = {}) => fetchAudioFile(ytMusicUrl(videoId), { ...opts, format: "m4a" });
+
+// Pure: decide the source URL for a query (URL must be allow-listed; text is searched).
+export function classifyQuery(query) {
+  const q = String(query || "").trim();
+  if (!q) return { kind: "empty" };
+  if (/^https?:\/\//i.test(q)) return isAllowedAudioUrl(q) ? { kind: "url", url: q } : { kind: "blocked" };
+  return { kind: "search", query: q };
+}
+
+export default {
+  config: {
+    name: "ytmp3",
+    version: "2.0.0",
+    role: 0,
+    countDown: 4,
+    category: "وسائط وتحميل",
+    description: "تحميل صوت MP3 من YouTube أو رابط صوتي عبر yy",
+    usage: [
+      "{pn}ytmp3 <اسم الأغنية> — البحث وتنزيل أول نتيجة كـMP3",
+      "{pn}ytmp3 <رابط YouTube أو SoundCloud> — تنزيل الصوت",
+    ],
+  },
+  onStart: async ({ api, message, args, event }) => {
+    const { threadID, messageID } = event;
+    const q = classifyQuery((args || []).join(" "));
+    if (q.kind === "empty") return message.reply("الاستخدام: ytmp3 <اسم الأغنية أو رابط YouTube/SoundCloud>");
+    if (q.kind === "blocked") return message.reply(audioErrorText({ code: "blocked_url" }));
+    try {
+      getApiUrl();
+      let sourceUrl = q.url;
+      if (q.kind === "search") {
+        const [first] = await searchYt(q.query, 1);
+        assertDuration(first.duration);
+        sourceUrl = first.url;
+      }
+      await withTempDir(async (dir) => {
+        const filePath = await fetchAudioFile(sourceUrl, { dir, format: "mp3" });
+        await global.mediaSendFile(api, filePath, threadID, messageID);
+      }, "ytmp3");
+    } catch (error) {
+      console.error("[ytmp3]", error?.code || "", String(error?.message || error).slice(0, 200));
+      await reply(api, threadID, audioErrorText(error), messageID);
+    }
+  },
+};

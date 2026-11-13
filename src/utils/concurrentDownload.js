@@ -1,1 +1,7 @@
-"use strict";export async function downloadWithLimit(items,fetchFn,limit=6){const results=new Array(items.length).fill(null);let next=0;async function worker(){while(next<items.length){const i=next++;try{results[i]=await fetchFn(items[i],i)}catch{results[i]=null}}}await Promise.all(Array.from({length:Math.min(limit,items.length)},worker));return results}
+"use strict";
+import { pool } from "../infra/limiter.js";
+// Bounded-parallel map; failed items become null, order is preserved.
+export async function downloadWithLimit(items, fetchFn, limit = 6) {
+  const results = await pool(items, limit, fetchFn);
+  return results.map((r) => (r.ok ? r.value : null));
+}

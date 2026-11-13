@@ -1,1 +1,3 @@
-"use strict";import draw from"./_modules/draw.js";import img from"./_modules/img.js";import canva from"./_modules/canva.js";import slap from"./_modules/slap.js";import pin from"./_modules/pin.js";export const commands=[draw,img,canva,slap,pin];
+"use strict";
+import { discoverCommands } from "../core/Loader.js";
+export const commands = await discoverCommands(import.meta.url, ["draw", "img", "canva", "slap", "pin"]);

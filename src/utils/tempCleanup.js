@@ -1,1 +1,25 @@
-"use strict";import{readdir,stat,rm}from"node:fs/promises";import os from"os";import path from"path";const BOT_TMP_PREFIXES=["fb_","pin_","tumblr_","sc_","tts_","ydl_","yt_","yt2_","yt_a_","yt_v_","manga_","manga_3asq_","comic_","slap_","canva_","imagine_","autodl_img_","subtitled_","media_","groq-tts-","song-","split_","resplit_","fyp_","yy_"];async function cleanupOrphanTempFiles(){try{const dir=os.tmpdir();const now=Date.now();let removed=0;for(const name of await readdir(dir)){if(!BOT_TMP_PREFIXES.some(p=>name.startsWith(p)))continue;const fp=path.join(dir,name);try{const entryStat=await stat(fp);if(now-entryStat.mtimeMs>60*60*1e3){await rm(fp,{recursive:true,force:true});removed++}}catch(_){}}if(removed)console.log(`[CLEANUP] 🗑️ حُذف ${removed} ملف مؤقت يتيم`)}catch(e){console.warn("[CLEANUP] ⚠️ فشل تنظيف الملفات المؤقتة:",e.message)}}global.cleanupOrphanTempFiles=cleanupOrphanTempFiles;export{cleanupOrphanTempFiles};
+"use strict";
+import { readdir, stat, rm } from "node:fs/promises";
+import path from "node:path";
+import { sweepStaleRoots, tmpRoot } from "../io/tmp.js";
+
+// Old prefix-based sweeping is gone: every temp file now lives under one per-process root.
+// This removes roots left by dead processes plus stale files in the shared download dir of this one.
+async function cleanupOrphanTempFiles(maxAgeMs = 60 * 60 * 1e3) {
+  try {
+    let removed = await sweepStaleRoots(maxAgeMs);
+    const shared = path.join(await tmpRoot(), "dl");
+    for (const name of await readdir(shared).catch(() => [])) {
+      const fp = path.join(shared, name);
+      const st = await stat(fp).catch(() => null);
+      if (st && Date.now() - st.mtimeMs > maxAgeMs) { await rm(fp, { recursive: true, force: true }).catch(() => {}); removed++; }
+    }
+    if (removed) console.log(`[CLEANUP] حُذف ${removed} عنصر مؤقت يتيم`);
+    return removed;
+  } catch (e) {
+    console.warn("[CLEANUP] فشل تنظيف الملفات المؤقتة:", e.message);
+    return 0;
+  }
+}
+global.cleanupOrphanTempFiles = cleanupOrphanTempFiles;
+export { cleanupOrphanTempFiles };

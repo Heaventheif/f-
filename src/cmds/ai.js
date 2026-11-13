@@ -1,1 +1,3 @@
-"use strict";import gemini from"./_modules/gemini.js";import gptx from"./_modules/gptx.js";import groq from"./_modules/groq.js";import stt from"./_modules/stt.js";import tts from"./_modules/tts.js";export const commands=[gemini,gptx,groq,stt,tts];
+"use strict";
+import { discoverCommands } from "../core/Loader.js";
+export const commands = await discoverCommands(import.meta.url, ["gemini", "gptx", "groq", "stt", "tts"]);
