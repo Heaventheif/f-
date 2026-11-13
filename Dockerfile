@@ -1,7 +1,7 @@
 FROM oven/bun:1.3-alpine AS deps
 WORKDIR /app
 RUN apk add --no-cache python3 make g++ gcc git
-COPY package.json bun.lock bunfig.toml ./
+COPY package.json ./
 RUN bun install --production
 FROM oven/bun:1.3-alpine AS runner
 WORKDIR /app
