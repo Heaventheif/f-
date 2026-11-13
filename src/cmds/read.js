@@ -1,3 +1,1 @@
-"use strict";
-import { discoverCommands } from "../core/Loader.js";
-export const commands = await discoverCommands(import.meta.url, ["manga", "mangalik", "comic", "novel"]);
+"use strict";import manga from"./_modules/manga.js";import mangalik from"./_modules/mangalik.js";import comic from"./_modules/comic.js";import novel from"./_modules/novel.js";export const commands=[manga,mangalik,comic,novel];

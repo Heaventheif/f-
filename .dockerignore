@@ -2,8 +2,6 @@ node_modules
 .env
 .env.*
 appstate*.json
-appstate*.enc
-*.enc
 note-schedules.json
 *.log
 .git
@@ -11,3 +9,5 @@ note-schedules.json
 data
 temp
 Fca_Database
+botNames.json
+cmd-overrides.json

@@ -1,86 +1,13 @@
-import { Readable } from "stream";
-import { fetchJson } from "../../net/safeFetch.js";
-import { AppError } from "../../infra/errors.js";
-import { hfTarget } from "../../manga/hf.js";
-import { chessStore } from "../../chess/store.js";
-import { START_FEN, applyUci, isUciMove, normalizeMove, isReachableFen, statusOfFen, turnOf, fenToText } from "../../chess/rules.js";
-
-const ENGINE_TIMEOUT_MS = 55e3;
-const USERINFO_TIMEOUT_MS = 3e3;
-const BOARD_SEND_TIMEOUT_MS = 3e4;
-const SWEEP_EVERY_MS = 30 * 60 * 1e3;
-const MAX_IMAGE_B64 = 8 * 1024 * 1024;
-export const DEFAULT_DIFFICULTY = 10;
-const NO_HF_MSG = "⚠️ خادم الشطرنج غير مُعدّ (HF_SPACE_URL مفقود). تواصل مع المطوّر.";
-const PIECE_NAMES = { q: "وزير ♛", r: "قلعة ♜", b: "فيل ♝", n: "حصان ♞" };
-const reply = (api, text, threadID, messageID) => global.safeSend(api, text, threadID, null, messageID);
-
-let lastApi = null;
-function ensureSweeper() {
-  if (globalThis.__chessSweepTimer) return;
-  globalThis.__chessSweepTimer = setInterval(() => {
-    chessStore().sweep((g) => lastApi && global.safeSend(lastApi, "⌛ أُغلقت مباراة الشطرنج لعدم النشاط لأكثر من 24 ساعة.", g.threadID, null, undefined)).catch(() => {});
-  }, SWEEP_EVERY_MS);
-  globalThis.__chessSweepTimer.unref?.();
-}
-
-const NAME_CACHE_TTL_MS = 30 * 60 * 1e3;
-const _names = new Map();
-async function getUserName(api, uid) {
-  if (uid === "bot") return "🤖 البوت";
-  const hit = _names.get(uid);
-  if (hit && hit.exp > Date.now()) return hit.name;
-  const fallback = String(uid).slice(-4);
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      if (v) {
-        if (_names.size > 500) _names.delete(_names.keys().next().value);
-        _names.set(uid, { name: v, exp: Date.now() + NAME_CACHE_TTL_MS });
-      }
-      resolve(v || fallback);
-    };
-    const timer = setTimeout(() => finish(null), USERINFO_TIMEOUT_MS);
-    try {
-      api.getUserInfo(uid, (err, data) => {
-        const u = data?.[uid];
-        if (err || !u) return finish(null);
-        finish(u.name || u.fullName || `${u.firstName || ""} ${u.lastName || ""}`.trim());
-      });
-    } catch { finish(null); }
-  });
-}
-
-// HF engine: bot move and/or board rendering only. Token goes to https allowlisted hosts only.
-export async function callEngine({ fen, move, botMode, difficulty, perspective, target = hfTarget(), getJson = fetchJson }) {
-  if (!target) throw new AppError("not_configured", "hf_not_configured");
-  const d = await getJson(`${target.base}/process_move`, {
-    method: "POST", timeoutMs: ENGINE_TIMEOUT_MS, headers: target.headers, allowHosts: [target.host],
-    body: { fen, move: move || null, bot_mode: !!botMode, difficulty: Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 20 ? difficulty : DEFAULT_DIFFICULTY, perspective },
-  });
-  if (d && typeof d.image_base64 === "string" && d.image_base64.length > MAX_IMAGE_B64) d.image_base64 = null;
-  return d || {};
-}
-
-async function sendBoard(api, threadID, messageID, imageBase64, caption, fen = null) {
-  const textFallback = () => reply(api, [caption, fenToText(fen)].filter(Boolean).join("\n\n"), threadID, messageID);
-  if (!imageBase64 || typeof imageBase64 !== "string" || imageBase64.length > MAX_IMAGE_B64) return textFallback();
-  let timer;
-  try {
-    const stream = Readable.from(Buffer.from(imageBase64, "base64"));
-    stream.path = "chess_board.png";
-    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("board send timeout")), BOARD_SEND_TIMEOUT_MS); });
-    await Promise.race([global.mediaSend(api, { body: caption, attachment: stream }, threadID, void 0, messageID), timeout]);
-  } catch (e) {
-    console.error("[CHESS:ERR]", e?.message || e);
-    await textFallback().catch(() => {});
-  } finally { clearTimeout(timer); }
-}
-
-const HELP = `♟️ قواعد بوت الشطرنج الرسومي
+"use strict";import{Readable}from"stream";import http from"../../utils/fetchHttp.js";import{getHfBaseOrNull}from"../../utils/hfClient.js";import{ensurePostgresSchema}from"../../utils/postgres.js";const ENGINE_TIMEOUT_MS=55e3;const USERINFO_TIMEOUT_MS=3e3;const DEFAULT_DIFFICULTY=10;const START_FEN="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";const SWEEP_EVERY_MS=30*60*1e3;const FINISHED_TTL_MS=2*60*60*1e3;const NO_HF_MSG="⚠️ خادم الشطرنج غير مُعدّ (HF_SPACE_URL مفقود). تواصل مع المطوّر.";const _games=globalThis.__chessGames??=new Map;const _busy=globalThis.__chessBusy??=new Set;function sweepFinished(){const now=Date.now();for(const[id,g]of _games){if(g.status==="active")continue;const at=Date.parse(g.endedAt||g.createdAt||0)||0;if(now-at>FINISHED_TTL_MS)_games.delete(id)}}if(!globalThis.__chessSweepTimer){globalThis.__chessSweepTimer=setInterval(()=>sweepFinished(),SWEEP_EVERY_MS);globalThis.__chessSweepTimer.unref?.()}async function findActiveGame(threadID,playerId){for(const g of _games.values()){if(g.threadID===threadID&&g.status==="active"&&(g.player_white===playerId||g.player_black===playerId))return g}try{const db=await ensurePostgresSchema();if(!db)return null;const result=await db.query(`SELECT id, payload FROM sunkenbot_chess_games
+       WHERE thread_id = $1 AND status = 'active' AND (player_white = $2 OR player_black = $2)
+       ORDER BY updated_at DESC LIMIT 1`,[String(threadID),String(playerId)]);const row=result.rows?.[0];if(!row)return null;const doc={...row.payload,_id:row.id};_games.set(String(row.id),doc);return doc}catch(e){console.warn("[CHESS DB]",e.message);return null}}async function createGame(game){game.status="active";game.createdAt=new Date().toISOString();game._id??=`${game.threadID}_${Date.now()}`;try{const db=await ensurePostgresSchema();if(db)await db.query(`INSERT INTO sunkenbot_chess_games (id, payload, thread_id, status, player_white, player_black, updated_at)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6, NOW())
+       ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, thread_id=EXCLUDED.thread_id,
+       status=EXCLUDED.status, player_white=EXCLUDED.player_white, player_black=EXCLUDED.player_black, updated_at=NOW()`,[String(game._id),JSON.stringify(game),String(game.threadID),game.status,String(game.player_white??""),String(game.player_black??"")])}catch(e){console.warn("[CHESS DB] save failed:",e.message)}_games.set(String(game._id),{...game});return game}async function updateGame(id,patch){id=String(id);const g=_games.get(id);if(g)Object.assign(g,patch);try{const db=await ensurePostgresSchema();if(!db)return;const result=await db.query("SELECT payload FROM sunkenbot_chess_games WHERE id = $1",[id]);const current={...result.rows?.[0]?.payload||g||{_id:id},...patch,_id:id};await db.query(`INSERT INTO sunkenbot_chess_games (id, payload, thread_id, status, player_white, player_black, updated_at)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6, NOW())
+       ON CONFLICT (id) DO UPDATE SET payload=EXCLUDED.payload, thread_id=EXCLUDED.thread_id,
+       status=EXCLUDED.status, player_white=EXCLUDED.player_white, player_black=EXCLUDED.player_black, updated_at=NOW()`,[id,JSON.stringify(current),String(current.threadID||""),String(current.status||"active"),String(current.player_white??""),String(current.player_black??"")])}catch(e){console.warn("[CHESS DB] update failed:",e.message)}}async function endGame(game,winnerId=null){const winner=!winnerId?null:winnerId===game.player_white?"white":"black";await updateGame(game._id,{status:"completed",winner,winnerId,endedAt:new Date().toISOString()});_games.delete(String(game._id))}const NAME_CACHE_TTL_MS=30*60*1e3;const _names=globalThis.__chessNames??=new Map;async function getUserName(api,uid){if(uid==="bot")return"🤖 البوت";const hit=_names.get(uid);if(hit&&hit.exp>Date.now())return hit.name;const fallback=String(uid).slice(-4);return new Promise(resolve=>{let done=false;let timer=null;const finish=v=>{if(done)return;done=true;clearTimeout(timer);if(v){if(_names.size>500)_names.delete(_names.keys().next().value);_names.set(uid,{name:v,exp:Date.now()+NAME_CACHE_TTL_MS})}resolve(v||fallback)};timer=setTimeout(()=>finish(null),USERINFO_TIMEOUT_MS);try{api.getUserInfo(uid,(err,data)=>{const u=data?.[uid];if(err||!u)return finish(null);finish(u.name||u.fullName||`${u.firstName||""} ${u.lastName||""}`.trim())})}catch{finish(null)}})}async function callChessEngine(fen,move,botMode,difficulty,perspective){const base=getHfBaseOrNull();if(!base)throw new Error("HF_SPACE_URL missing");const token=process.env.INTERNAL_TOKEN??"";const res=await http.post(`${base}/process_move`,{fen,move:move||null,bot_mode:botMode,difficulty:Number.isInteger(difficulty)&&difficulty>0?difficulty:DEFAULT_DIFFICULTY,perspective},{timeout:ENGINE_TIMEOUT_MS,headers:{"Content-Type":"application/json",...token?{"X-Internal-Token":token}:{}}});return res.data}const normalizeMove=s=>s.replace(/\s+/g,"").toLowerCase();const isChessMove=s=>/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(normalizeMove(s));const PIECE_NAMES={q:"وزير ♛",r:"قلعة ♜",b:"فيل ♝",n:"حصان ♞"};const reply=(api,text,threadID,messageID)=>global.safeSend(api,text,threadID,null,messageID);const BOARD_SEND_TIMEOUT_MS=3e4;const FEN_GLYPHS={K:"♔",Q:"♕",R:"♖",B:"♗",N:"♘",P:"♙",k:"♚",q:"♛",r:"♜",b:"♝",n:"♞",p:"♟"};function fenToText(fen){if(!fen)return"";const rows=String(fen).split(" ")[0].split("/");if(rows.length!==8)return"";const lines=rows.map((row,i)=>{let out="";for(const ch of row)out+=/\d/.test(ch)?"· ".repeat(Number(ch)):`${FEN_GLYPHS[ch]||"?"} `;return`${8-i} ${out.trimEnd()}`});return`${lines.join("\n")}
+  a b c d e f g h`}async function sendBoard(api,threadID,messageID,imageBase64,caption,fen=null){const textFallback=()=>reply(api,[caption,fenToText(fen)].filter(Boolean).join("\n\n"),threadID,messageID);if(!imageBase64)return textFallback();let timer;try{const stream=Readable.from(Buffer.from(imageBase64,"base64"));stream.path="chess_board.png";const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error("board send timeout")),BOARD_SEND_TIMEOUT_MS)});await Promise.race([global.mediaSend(api,{body:caption,attachment:stream},threadID,void 0,messageID),timeout])}catch(__err){console.error("[CHESS:ERR]",__err?.message||__err);await textFallback().catch(()=>{})}finally{clearTimeout(timer)}}function winnerSide(winner){if(winner===null||winner===void 0||winner==="")return null;const w=String(winner).trim().toLowerCase();if(/^(draw|none|تعادل)$/.test(w))return null;const white=/(^w$|white|أبيض|ابيض)/.test(w);const black=/(^b$|black|أسود|اسود)/.test(w);if(white===black)return void 0;return white?"white":"black"}const HELP=`♟️ قواعد بوت الشطرنج الرسومي
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 🚀 بدء لعبة:
   chess bot      — ضد الذكاء الاصطناعي
@@ -108,190 +35,21 @@ const HELP = `♟️ قواعد بوت الشطرنج الرسومي
 📌 ملاحظات:
   • لا يمكن بدء لعبتين في نفس الوقت
   • النقلات غير القانونية تُرفض مع سبب الرفض
-  • في لعبة البوت: يرد تلقائياً بعد كل نقلتك`;
-const START_USAGE = `♟️ بوت الشطرنج
+  • في لعبة البوت: يرد تلقائياً بعد كل نقلتك`;const START_USAGE=`♟️ بوت الشطرنج
   chess bot   — ضد الذكاء الاصطناعي
   chess @شخص  — ضد لاعب
   رد + chess  — تحدي صاحب الرسالة
-  chess help  — القواعد والنقلات الخاصة`;
-// Applies a player's move: local legality via chess.js, engine for the bot reply / rendering.
-async function handleMove({ api, event, game, text }) {
-  const { threadID, messageID } = event;
-  const senderID = String(event.senderID);
-  const isBotGame = game.player_white === "bot" || game.player_black === "bot";
-  const me = game.player_white === senderID ? "white" : "black";
-  const opponent = me === "white" ? game.player_black : game.player_white;
-  const r = applyUci(game.fen, text);
-  if (!r.ok) {
-    return reply(api, r.reason === "illegal" ? `❌ نقلة غير قانونية: ${normalizeMove(text)}\nجرّب نقلة أخرى.` : "⚠️ تعذّر قراءة اللوحة. أبلغ المطوّر.", threadID, messageID);
-  }
-  const target = hfTarget();
-  let fen = r.fen;
-  let image = null;
-  let gameOver = r.gameOver, result = r.result;
-  let engineNote = "";
-  if (isBotGame && !r.gameOver) {
-    // engine plays the bot's reply; its FEN must be a legal continuation of ours
-    let d;
-    try { d = await callEngine({ fen: game.fen, move: r.uci, botMode: true, difficulty: game.difficulty, perspective: me, target }); }
-    catch (e) {
-      const msg = e?.code === "not_configured" ? NO_HF_MSG : `⚠️ فشل الاتصال بسيرفر الشطرنج. لم تُحتسب نقلتك، أعدها.`;
-      return reply(api, msg, threadID, messageID);
-    }
-    if (typeof d.illegal_move_error === "string") return reply(api, d.illegal_move_error.slice(0, 200), threadID, messageID);
-    if (typeof d.new_fen !== "string" || !isReachableFen(r.fen, d.new_fen)) {
-      return reply(api, "⚠️ ردّ المحرك غير صالح. لم تُحتسب نقلتك، أعدها.", threadID, messageID);
-    }
-    fen = d.new_fen;
-    image = d.image_base64;
-    const st = statusOfFen(fen, me === "white" ? "b" : "w");
-    gameOver = st.gameOver;
-    result = st.result;
-  } else if (target) {
-    // human game / finishing move: engine only renders the board
-    try { image = (await callEngine({ fen: game.fen, move: r.uci, botMode: false, difficulty: game.difficulty, perspective: me, target })).image_base64; } catch { engineNote = ""; }
-  }
-  const promo = r.promotion ? `\n⬆️ ترقية إلى ${PIECE_NAMES[r.promotion] || PIECE_NAMES.q}` : "";
-  let caption, patch;
-  if (gameOver) {
-    const winnerId = result?.winner ? (result.winner === "white" ? game.player_white : game.player_black) : null;
-    patch = { fen, status: "completed", winner: result?.winner || null, winnerId, endedAt: Date.now() };
-    caption = winnerId ? `♟️ كش مات!\n🏆 الفائز: ${await getUserName(api, winnerId)}` : "🤝 تعادل!";
-  } else {
-    const next = isBotGame ? senderID : opponent;
-    patch = { fen, current_turn: next };
-    caption = isBotGame
-      ? `✅ نقلتك: ${r.uci.toUpperCase()}${promo}\n🤖 البوت لعب — دورك الآن!`
-      : `✅ نقلة: ${r.uci.toUpperCase()}${promo}\n🎯 دور: ${await getUserName(api, opponent)}`;
-  }
-  try { await chessStore().update(game.id, game.version, patch); }
-  catch (e) { return reply(api, e?.code === "conflict" ? "⚠️ تغيّرت اللعبة، أعد المحاولة." : "⚠️ تعذّر حفظ النقلة. أعد المحاولة.", threadID, messageID); }
-  void engineNote;
-  await sendBoard(api, threadID, messageID, image, caption, fen);
-}
-
-async function onChat({ api, event }) {
-  if (!event.isGroup) return;
-  lastApi = api;
-  ensureSweeper();
-  const { threadID, body, messageID } = event;
-  const senderID = String(event.senderID);
-  const text = body?.trim();
-  if (!text) return;
-  const lower = text.toLowerCase();
-  const store = chessStore();
-  if (lower === "chess help" || lower === "شطرنج مساعدة") return reply(api, HELP, threadID, messageID);
-  if (lower === "resign" || lower === "استسلام") {
-    const g = await store.findActive(threadID, senderID);
-    if (!g) return;
-    return store.withLock(g.id, async () => {
-      const cur = await store.get(g.id);
-      if (!cur || cur.status !== "active") return;
-      const winnerId = cur.player_white === senderID ? cur.player_black : cur.player_white;
-      await store.update(cur.id, cur.version, { status: "completed", winner: winnerId === cur.player_white ? "white" : "black", winnerId, endedAt: Date.now() });
-      return reply(api, `🏳️ استسلم اللاعب!\n🏆 الفائز: ${await getUserName(api, winnerId)}`, threadID, messageID);
-    });
-  }
-  if (!isUciMove(text)) return;
-  const firstWord = text.split(/\s+/)[0].toLowerCase();
-  if (global.commands?.has(firstWord)) return;
-  const game = await store.findActive(threadID, senderID);
-  if (!game) return;
-  // "not your turn" only now that the text really looks like a move
-  if (game.current_turn !== senderID) return reply(api, "⏳ ليس دورك الآن.", threadID, messageID);
-  await store.withLock(game.id, async () => {
-    const cur = await store.get(game.id);
-    if (!cur || cur.status !== "active" || cur.current_turn !== senderID) return;
-    try { await handleMove({ api, event, game: cur, text }); }
-    catch (e) { console.error("[CHESS]", e?.code || "", e?.message); await reply(api, "⚠️ حدث خطأ أثناء معالجة النقلة.", threadID, messageID).catch(() => {}); }
-  });
-}
-
-async function onStart({ api, event, args }) {
-  lastApi = api;
-  ensureSweeper();
-  const { threadID, messageID, mentions, messageReply } = event;
-  const senderID = String(event.senderID);
-  const store = chessStore();
-  const words = args.map((a) => String(a).toLowerCase().trim()).filter(Boolean);
-  const query = words.join(" ");
-  const mentionIds = Object.keys(mentions || {});
-  if (["help", "مساعدة", "قواعد"].includes(query)) return reply(api, HELP, threadID, messageID);
-  if (!query && !messageReply && !mentionIds.length) return reply(api, START_USAGE, threadID, messageID);
-  if (!hfTarget()) return reply(api, NO_HF_MSG, threadID, messageID);
-  if (await store.findActive(threadID, senderID)) return reply(api, "⚠️ لديك مباراة نشطة!\nاكتب resign لإنهائها أولاً.", threadID, messageID);
-  // optional difficulty: `chess bot 5` (1-20)
-  let difficulty = DEFAULT_DIFFICULTY;
-  let opponentId;
-  if (/^(bot|بوت)$/.test(words[0] || "")) {
-    opponentId = "bot";
-    if (words[1] !== undefined) {
-      const d = Number(words[1]);
-      if (!Number.isInteger(d) || d < 1 || d > 20) return reply(api, "❌ مستوى الصعوبة من 1 إلى 20.\nمثال: chess bot 5", threadID, messageID);
-      difficulty = d;
-    }
-  } else if (mentionIds.length) opponentId = String(mentionIds[0]);
-  else if (messageReply) opponentId = String(messageReply.senderID);
-  else return reply(api, "❌ حدد منافسك:\n  chess bot — ضد البوت\n  chess @شخص — ضد لاعب", threadID, messageID);
-  if (!opponentId || opponentId === senderID) return reply(api, "❌ لا يمكنك تحدي نفسك!", threadID, messageID);
-  if (opponentId !== "bot" && (await store.findActive(threadID, opponentId))) return reply(api, "⚠️ هذا اللاعب لديه مباراة نشطة بالفعل!", threadID, messageID);
-  const senderWhite = Math.random() < 0.5;
-  const white = senderWhite ? senderID : opponentId;
-  const black = senderWhite ? opponentId : senderID;
-  const [senderName, opponentName] = await Promise.all([getUserName(api, senderID), getUserName(api, opponentId)]);
-  let game = await store.create({ threadID, player_white: white, player_black: black, current_turn: white, fen: START_FEN, difficulty });
-  let image = null, currentFen = START_FEN, note = "";
-  try {
-    if (opponentId === "bot" && white === "bot") {
-      let opening;
-      try { opening = await callEngine({ fen: START_FEN, move: null, botMode: true, difficulty, perspective: "black" }); } catch (e) {
-        await store.update(game.id, game.version, { status: "aborted", endedAt: Date.now() });
-        return reply(api, "⚠️ تعذّر بدء اللعبة — فشل البوت في لعب النقلة الأولى.\nحاول مرة أخرى بعد قليل.", threadID, messageID);
-      }
-      if (typeof opening.new_fen !== "string" || !isReachableFen(START_FEN, opening.new_fen)) {
-        await store.update(game.id, game.version, { status: "aborted", endedAt: Date.now() });
-        return reply(api, "⚠️ ردّ المحرك غير صالح. حاول مرة أخرى.", threadID, messageID);
-      }
-      image = opening.image_base64;
-      currentFen = opening.new_fen;
-      note = "\n🤖 البوت فتح اللعبة — دورك الآن!";
-      game = await store.update(game.id, game.version, { fen: currentFen, current_turn: senderID });
-    } else {
-      try { image = (await callEngine({ fen: START_FEN, move: null, botMode: false, difficulty, perspective: senderWhite ? "white" : "black" })).image_base64; } catch { /* text board fallback */ }
-    }
-  } catch (e) {
-    console.error("[CHESS]", e?.code || "", e?.message);
-    return reply(api, "⚠️ تعذّر بدء اللعبة. حاول لاحقاً.", threadID, messageID);
-  }
-  const firstPlayer = white === "bot" ? "🤖 البوت (لعب بالفعل)" : white === senderID ? senderName : opponentName;
-  const caption =
-    `♟️ بدأت مباراة شطرنج!\n${senderWhite ? "⬜ أبيض" : "⬛ أسود"}: ${senderName}\n${senderWhite ? "⬛ أسود" : "⬜ أبيض"}: ${opponentName}\n🎯 يبدأ: ${firstPlayer}${note}\n` +
-    (opponentId === "bot" && white !== "bot" ? "🤖 البوت سيرد تلقائياً بعد كل نقلتك\n" : "") +
-    `\n💡 chess help — لمعرفة النقلات الخاصة`;
-  await sendBoard(api, threadID, messageID, image, caption, currentFen);
-}
-void turnOf;
-
-export default {
-  config: {
-    name: "chess",
-    aliases: ["شطرنج"],
-    version: "3.0.0",
-    author: "Sunken",
-    countDown: 5,
-    role: 0,
-    category: "ألعاب وترفيه",
-    groupOnly: true,
-    description: "بوت شطرنج رسومي للمجموعات (ضد لاعب أو ضد البوت)",
-    usage: [
-      "{pn}chess bot [1-20] — بدء مباراة ضد الذكاء الاصطناعي (الرقم = الصعوبة، افتراضي 10)",
-      "{pn}chess @شخص — تحدي لاعب عبر منشن",
-      "رد على رسالة + {pn}chess — تحدي صاحب الرسالة",
-      "e2e4 (أو أي نقلة صحيحة) — تُلعب تلقائياً أثناء مباراة نشطة، بلا أمر",
-      "resign / استسلام — الاستسلام من المباراة الحالية",
-      "{pn}chess help — عرض القواعد الكاملة والنقلات الخاصة",
-    ],
-  },
-  onChat,
-  onStart,
-};
+  chess help  — القواعد والنقلات الخاصة`;async function onChat({api,event}){if(!event.isGroup)return;const{threadID,senderID,body,messageID}=event;const text=body?.trim();if(!text)return;const lower=text.toLowerCase();if(lower==="chess help"||lower==="شطرنج مساعدة"){return reply(api,HELP,threadID,messageID)}if(lower==="resign"||lower==="استسلام"){const game2=await findActiveGame(threadID,senderID);if(!game2)return;const winnerId=game2.player_white===senderID?game2.player_black:game2.player_white;await endGame(game2,winnerId);const name=await getUserName(api,winnerId);return reply(api,`🏳️ استسلم اللاعب!
+🏆 الفائز: ${name}`,threadID,messageID)}if(!isChessMove(text))return;const firstWord=text.split(/\s+/)[0].toLowerCase();if(global.commands?.has(firstWord))return;const game=await findActiveGame(threadID,senderID);if(!game||game.current_turn!==senderID)return;if(_busy.has(game._id))return;if(!getHfBaseOrNull())return reply(api,NO_HF_MSG,threadID,messageID);_busy.add(game._id);let persist=null;try{const t0=Date.now();const move=normalizeMove(text);const isBotGame=game.player_white==="bot"||game.player_black==="bot";const perspective=game.player_white===senderID?"white":"black";const opponent=game.player_white===senderID?game.player_black:game.player_white;const opponentName=isBotGame?null:getUserName(api,opponent);let result;try{result=await callChessEngine(game.fen,move,isBotGame,game.difficulty,perspective)}catch(e){const reason=e.response?.data?.detail||e.message||"";return reply(api,`⚠️ فشل الاتصال بسيرفر الشطرنج
+${String(reason).substring(0,80)}`,threadID,messageID)}if(result.illegal_move_error)return reply(api,result.illegal_move_error,threadID,messageID);const tEngine=Date.now()-t0;let caption;if(result.game_over){const side=winnerSide(result.winner);if(side===void 0){console.warn("[CHESS] قيمة winner غير معروفة من المحرك:",JSON.stringify(result.winner));await endGame(game,null);caption="♟️ انتهت المباراة (تعذّر تحديد الفائز من استجابة المحرك)."}else if(side===null){await endGame(game,null);caption="🤝 تعادل!"}else{const winnerId=side==="white"?game.player_white:game.player_black;await endGame(game,winnerId);caption=`♟️ كش مات!
+🏆 الفائز: ${await getUserName(api,winnerId)}`}}else{const next=isBotGame?senderID:opponent;persist=updateGame(game._id,{fen:result.new_fen,current_turn:next});const promo=move.length===5?`
+⬆️ ترقية إلى ${PIECE_NAMES[move[4]]||PIECE_NAMES.q}`:"";caption=isBotGame?`✅ نقلتك: ${move.toUpperCase()}${promo}
+🤖 البوت لعب — دورك الآن!`:`✅ نقلة: ${move.toUpperCase()}${promo}
+🎯 دور: ${await opponentName}`}const tSend0=Date.now();await sendBoard(api,threadID,messageID,result.image_base64,caption,result.new_fen);console.log(`[CHESS] نقلة ${move}: المحرك ${tEngine}ms | الإرسال ${Date.now()-tSend0}ms | الإجمالي ${Date.now()-t0}ms`)}finally{if(persist)await persist.catch(e=>console.warn("[CHESS] updateGame failed:",e?.message||e));_busy.delete(game._id)}}async function onStart({api,event,args}){const{threadID,senderID,messageID,mentions,messageReply}=event;const query=args.join(" ").toLowerCase().trim();const mentionIds=Object.keys(mentions||{});if(["help","مساعدة","قواعد"].includes(query))return reply(api,HELP,threadID,messageID);if(!query&&!messageReply&&!mentionIds.length)return reply(api,START_USAGE,threadID,messageID);if(!getHfBaseOrNull())return reply(api,NO_HF_MSG,threadID,messageID);if(await findActiveGame(threadID,senderID)){return reply(api,"⚠️ لديك مباراة نشطة!\nاكتب resign لإنهائها أولاً.",threadID,messageID)}let opponentId;if(/^(bot|بوت)$/.test(query)){opponentId="bot"}else if(mentionIds.length){opponentId=mentionIds[0]}else if(messageReply){opponentId=messageReply.senderID}else{return reply(api,"❌ حدد منافسك:\n  chess bot — ضد البوت\n  chess @شخص — ضد لاعب",threadID,messageID)}if(!opponentId||opponentId===senderID){return reply(api,"❌ لا يمكنك تحدي نفسك!",threadID,messageID)}if(opponentId!=="bot"&&await findActiveGame(threadID,opponentId)){return reply(api,"⚠️ هذا اللاعب لديه مباراة نشطة بالفعل!",threadID,messageID)}const senderWhite=Math.random()<.5;const white=senderWhite?senderID:opponentId;const black=senderWhite?opponentId:senderID;const[senderName,opponentName]=await Promise.all([getUserName(api,senderID),getUserName(api,opponentId)]);const game=await createGame({threadID,player_white:white,player_black:black,current_turn:white,fen:START_FEN,difficulty:DEFAULT_DIFFICULTY,winner:null});_busy.add(game._id);let currentFen=START_FEN;try{let imageBase64=null;let note="";if(opponentId==="bot"&&white==="bot"){try{const opening=await callChessEngine(START_FEN,null,true,game.difficulty,"black");imageBase64=opening.image_base64;currentFen=opening.new_fen||START_FEN;note="\n🤖 البوت فتح اللعبة — دورك الآن!";await updateGame(game._id,{fen:opening.new_fen,current_turn:senderID})}catch(e){const reason=String(e.response?.data?.detail||e.message||"");console.warn("[CHESS] نقلة البوت الأولى فشلت:",reason);await updateGame(game._id,{status:"aborted",abortReason:reason,endedAt:new Date().toISOString()});return reply(api,`⚠️ تعذّر بدء اللعبة — فشل البوت في لعب النقلة الأولى.
+${reason.substring(0,150)}
+حاول مرة أخرى بعد قليل.`,threadID,messageID)}}else{try{const perspective=senderWhite?"white":"black";imageBase64=(await callChessEngine(START_FEN,null,false,game.difficulty,perspective)).image_base64}catch(e){console.warn("[CHESS] فشل صورة البداية:",e.response?.data?.detail||e.message)}}const firstPlayer=white==="bot"?"🤖 البوت (لعب بالفعل)":white===senderID?senderName:opponentName;const caption=`♟️ بدأت مباراة شطرنج!
+${senderWhite?"⬜ أبيض":"⬛ أسود"}: ${senderName}
+${senderWhite?"⬛ أسود":"⬜ أبيض"}: ${opponentName}
+🎯 يبدأ: ${firstPlayer}${note}
+`+(opponentId==="bot"&&white!=="bot"?"🤖 البوت سيرد تلقائياً بعد كل نقلتك\n":"")+`
+💡 chess help — لمعرفة النقلات الخاصة`;await sendBoard(api,threadID,messageID,imageBase64,caption,currentFen)}finally{_busy.delete(game._id)}}export default{config:{name:"chess",aliases:["شطرنج"],version:"2.1.0",author:"Sunken",countDown:5,role:0,category:"ألعاب وترفيه",groupOnly:true,description:"بوت شطرنج رسومي للمجموعات (ضد لاعب أو ضد البوت)",usage:["{pn}chess bot — بدء مباراة ضد الذكاء الاصطناعي","{pn}chess @شخص — تحدي لاعب عبر منشن","رد على رسالة + {pn}chess — تحدي صاحب الرسالة","e2e4 (أو أي نقلة صحيحة) — تُلعب تلقائياً أثناء مباراة نشطة، بلا أمر","resign / استسلام — الاستسلام من المباراة الحالية","{pn}chess help — عرض القواعد الكاملة والنقلات الخاصة"]},onChat,onStart};

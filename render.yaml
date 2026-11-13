@@ -4,8 +4,6 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     region: frankfurt
-    # NOTE: plan "free" sleeps after ~15 min without inbound HTTP, which kills the bot's MQTT
-    # session and the monitor. Use a paid plan (or an external pinger on /health) for 24/7.
     plan: free
     healthCheckPath: /health
     envVars:
@@ -25,10 +23,8 @@ services:
         sync: false
       - key: MAX_CONCURRENT_COMMANDS
         value: "5"
-      - key: MONITOR_INTERVAL_MIN # keep equal to the default in src/core/monitor.js
+      - key: MONITOR_INTERVAL_MIN
         value: "30"
-      - key: ALERT_WEBHOOK_URL
-        sync: false
       - key: PG_POOL_MAX
         value: "2"
       - key: FCA_ENABLE_KEEPALIVE
