@@ -2,7 +2,7 @@ FROM oven/bun:1.3-alpine AS deps
 WORKDIR /app
 RUN apk add --no-cache python3 make g++ gcc git
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile --production
+RUN bun install --production
 FROM oven/bun:1.3-alpine AS runner
 WORKDIR /app
 RUN apk add --no-cache ffmpeg

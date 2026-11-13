@@ -62,7 +62,23 @@ async function saveBotName(botIndex, name) {
 export async function getBotName(botIndex) {
   return (await loadBotNames())[String(botIndex)] || null;
 }
+// الافتراضي: القراءة من متغير البيئة APPSTATE فقط (بدون دمج مع PostgreSQL أو الملف المحلي).
+// للرجوع للسلوك القديم (دمج/استعادة من القاعدة) اضبط APPSTATE_USE_DB=true.
+// إذا كان APPSTATE فارغاً أو غير صالح نرجع للنسخة المخزَّنة كاحتياط.
 export async function loadAppState() {
+  const useDb = /^(1|true|yes|on)$/i.test(String(process.env.APPSTATE_USE_DB || "").trim());
+  if (!useDb) {
+    const envState = readAppStateFromEnv();
+    const keys = new Set((envState || []).map((c) => String(c?.key ?? c?.name ?? "")));
+    if (envState && keys.has("c_user") && keys.has("xs")) {
+      console.warn(`[APPSTATE] ✅ استخدام APPSTATE من متغير البيئة فقط (${envState.length} cookie)`);
+      return { state: envState, index: 1, source: "env-only" };
+    }
+    console.warn("[APPSTATE] ⚠️ APPSTATE في البيئة غير صالح/فارغ — محاولة الاستعادة من النسخة المخزَّنة");
+  }
+  return loadAppStateMerged();
+}
+async function loadAppStateMerged() {
   const envState = readAppStateFromEnv();
   const record = await readPersistedAppStateRecordFromDatabase();
   const forceEnv = /^(1|true|yes|on)$/i.test(String(process.env.APPSTATE_FORCE_ENV || "").trim());
