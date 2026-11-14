@@ -1,5 +1,5 @@
 "use strict";
-// Friend / message request management on top of fcanew (global.botApi)
+// Friend / message request management on top of fca-nx (global.botApi)
 
 export class RequestError extends Error {
   constructor(message, status = 500, code = "INTERNAL") {
@@ -23,7 +23,7 @@ function getApi(...methods) {
   return api;
 }
 
-// Supports fcanew's node callback and Promise forms, while settling only once.
+// Supports fca-nx's node callback and Promise forms, while settling only once.
 function call(api, method, ...args) {
   return new Promise((resolve, reject) => {
     let done = false;
@@ -83,7 +83,7 @@ function normFriend(u) {
     name: str(u.fullName || u.name),
     fullName: str(u.fullName || u.name),
     isFriend,
-    // This is a candidate only. fcanew's getFriendsList is not a guaranteed
+    // This is a candidate only. fca-nx's getFriendsList is not a guaranteed
     // pending-request endpoint, so callers must not treat it as authoritative.
     isPendingCandidate: !isFriend,
     profilePicture: str(u.profilePicture, 500),
