@@ -1,7 +1,7 @@
 {
   "name": "SunkenBot",
-  "version": "5.1.0",
-  "description": "SunkenBot v5.1 — fca-nx engine + human-behavior anti-ban layer",
+  "version": "5.2.0",
+  "description": "SunkenBot v5.2 — fca-nx engine + human-behavior anti-ban layer (cleaned & hardened)",
   "main": "main.js",
   "type": "module",
   "engines": {
@@ -17,12 +17,8 @@
   "dependencies": {
     "cheerio": "^1.2.0",
     "fca-nx": "^6.8.3",
-    "form-data": "^4.0.6",
     "googletrans": "1.0.29",
-    "https-proxy-agent": "^7.0.6",
-    "mqtt": "^4.3.8",
     "pg": "^8.16.3",
-    "ws": "^8.21.3",
     "yt-search": "^2.13.1"
   }
 }

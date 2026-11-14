@@ -42,14 +42,6 @@ for (const name of Object.keys(original)) {
   };
 }
 
-try {
-  const npmlog = await import("npmlog");
-  const logger = npmlog.default || npmlog;
-  if (logger && process.env.FCA_LOG_LEVEL !== "off") {
-    logger.level = String(process.env.FCA_LOG_LEVEL || "error");
-  }
-} catch {}
-
 export function restoreConsole() {
   for (const [name, fn] of Object.entries(original)) console[name] = fn;
 }

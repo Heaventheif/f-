@@ -1,5 +1,5 @@
 "use strict";
-// Friend / message request management on top of fca-nx (global.botApi)
+// Message-request management on top of fca-nx (global.botApi)
 
 export class RequestError extends Error {
   constructor(message, status = 500, code = "INTERNAL") {
@@ -75,22 +75,6 @@ export function parseAction(v) {
 
 const str = (v, n = 200) => (v == null ? "" : String(v).slice(0, n));
 
-function normFriend(u) {
-  const id = str(u.userID ?? u.id, 30);
-  const isFriend = !!u.isFriend;
-  return {
-    userID: id,
-    name: str(u.fullName || u.name),
-    fullName: str(u.fullName || u.name),
-    isFriend,
-    // This is a candidate only. fca-nx's getFriendsList is not a guaranteed
-    // pending-request endpoint, so callers must not treat it as authoritative.
-    isPendingCandidate: !isFriend,
-    profilePicture: str(u.profilePicture, 500),
-    profileUrl: str(u.profileUrl || (id ? `https://www.facebook.com/${id}` : ""), 500),
-  };
-}
-
 function normThread(t, folder) {
   const isGroup = t.isGroup === true || Number(t.threadType) === 2;
   return {
@@ -107,24 +91,6 @@ function normThread(t, folder) {
   };
 }
 
-export async function listFriends() {
-  const api = getApi("getFriendsList");
-  try {
-    const list = await call(api, "getFriendsList");
-    const items = (Array.isArray(list) ? list : []).map(normFriend).filter(f => f.userID);
-    const pendingCandidates = items.filter(f => f.isPendingCandidate);
-    return {
-      items,
-      count: items.length,
-      pendingCandidates,
-      pendingCandidateCount: pendingCandidates.length,
-      warning: "getFriendsList لا يضمن أنها قائمة طلبات الصداقة المعلقة؛ يجب التحقق من Adapter المكتبة قبل تنفيذ إجراء الصداقة.",
-    };
-  } catch (e) {
-    throw wrapFbError(e, "friends");
-  }
-}
-
 export async function listMessages({ folder, limit } = {}) {
   const f = parseFolder(folder);
   const l = parseLimit(limit);
@@ -139,48 +105,10 @@ export async function listMessages({ folder, limit } = {}) {
 }
 
 export async function listRequests({ kind = "all", folder, limit } = {}) {
-  if (!["all", "friend", "message"].includes(kind)) {
+  if (!["all", "message"].includes(kind)) {
     throw new RequestError("kind غير صالح", 400, "INVALID_KIND");
   }
-  const out = { ok: true, fetchedAt: new Date().toISOString() };
-  if (kind === "all" || kind === "friend") out.friends = await listFriends();
-  if (kind === "all" || kind === "message") out.messages = await listMessages({ folder, limit });
-  return out;
-}
-
-function friendActionsEnabled() {
-  throw new RequestError(
-    "قبول/رفض الصداقة معطّل داخل الكود حتى إضافة Adapter موثوق لطلبات Facebook",
-    501,
-    "FRIEND_ACTIONS_NOT_IMPLEMENTED",
-  );
-}
-
-async function verifyFriendCandidate(id) {
-  // Prevent acting on a known existing friend. This is only a guard; the
-  // library still needs a verified pending-request adapter for production.
-  const current = await listFriends();
-  const candidate = current.pendingCandidates.find(item => item.userID === id);
-  if (!candidate) {
-    throw new RequestError(
-      "المستخدم غير موجود ضمن المرشحين الحاليين لطلبات الصداقة؛ حدّث القائمة أولاً",
-      409,
-      "FRIEND_REQUEST_NOT_FOUND",
-    );
-  }
-}
-
-export async function handleFriend(userId, action) {
-  const id = validateId(userId, "userId");
-  const a = parseAction(action);
-  friendActionsEnabled();
-  const api = getApi("handleFriendRequest");
-  try {
-    await call(api, "handleFriendRequest", id, a === "accept");
-    return { ok: true, kind: "friend", action: a, userID: id, changed: true, refreshAvailable: true };
-  } catch (e) {
-    throw wrapFbError(e, "friend");
-  }
+  return { ok: true, fetchedAt: new Date().toISOString(), messages: await listMessages({ folder, limit }) };
 }
 
 export async function handleMessage(threadId, action) {
@@ -203,36 +131,24 @@ export async function handleMessage(threadId, action) {
 }
 
 export async function bulk({ kind, action, ids }) {
-  if (kind !== "friend" && kind !== "message") throw new RequestError("kind غير صالح", 400, "INVALID_KIND");
+  if (kind !== "message") throw new RequestError("kind غير صالح", 400, "INVALID_KIND");
   const a = parseAction(action);
   if (!Array.isArray(ids) || !ids.length) throw new RequestError("ids مطلوبة", 400, "INVALID_IDS");
   if (ids.length > LIMITS.maxBulk) throw new RequestError(`الحد الأقصى ${LIMITS.maxBulk} عنصرًا`, 400, "TOO_MANY_IDS");
   const clean = [...new Set(ids.map(i => validateId(i)))];
-  if (kind === "friend") friendActionsEnabled();
+  const api = getApi("handleMessageRequest");
   const results = [];
-  if (kind === "message") {
-    const api = getApi("handleMessageRequest");
-    try {
-      await call(api, "handleMessageRequest", clean, a === "accept");
-      clean.forEach(id => results.push({ id, success: true }));
-    } catch (e) {
-      console.error("[REQUESTS:bulk]", e?.message || e);
-      for (const id of clean) {
-        try {
-          await call(api, "handleMessageRequest", id, a === "accept");
-          results.push({ id, success: true });
-        } catch {
-          results.push({ id, success: false, error: "فشلت العملية" });
-        }
-      }
-    }
-  } else {
+  try {
+    await call(api, "handleMessageRequest", clean, a === "accept");
+    clean.forEach(id => results.push({ id, success: true }));
+  } catch (e) {
+    console.error("[REQUESTS:bulk]", e?.message || e);
     for (const id of clean) {
       try {
-        await handleFriend(id, a);
+        await call(api, "handleMessageRequest", id, a === "accept");
         results.push({ id, success: true });
-      } catch (err) {
-        results.push({ id, success: false, error: String(err.message).slice(0, 120) });
+      } catch {
+        results.push({ id, success: false, error: "فشلت العملية" });
       }
     }
   }

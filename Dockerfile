@@ -13,8 +13,8 @@ ENV TMPDIR=/tmp/sunkenbot-media
 RUN addgroup -S botgroup && adduser -S botuser -G botgroup
 COPY --chown=botuser:botgroup --from=deps /app/node_modules ./node_modules
 COPY --chown=botuser:botgroup . .
-RUN mkdir -p /tmp/broadcast /tmp/sunkenbot-media /app/temp /app/Fca_Database \
-    && chown -R botuser:botgroup /tmp/broadcast /tmp/sunkenbot-media /app/temp /app/Fca_Database
+RUN mkdir -p /tmp/broadcast /tmp/sunkenbot-media \
+    && chown -R botuser:botgroup /tmp/broadcast /tmp/sunkenbot-media
 USER botuser
 EXPOSE 10000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
